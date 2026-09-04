@@ -1,0 +1,428 @@
+// runner.js — WebGL2 runner for Shadertoy `mainImage` fragment shaders.
+// Exposes window.Runner = { init(canvas), select(id), run(), stop(), stats() }.
+//
+// Design (per AGENTS.md):
+//   * classic <script>, no modules; node-compatible (module.exports stub).
+//   * WebGL2 only, zero deps.
+//   * fullscreen triangle (no allocations per frame).
+//   * allocate-once: 4 channel textures + 1 ping FBOs reused across shaders.
+//   * no {}/[]/closures inside requestAnimationFrame (mutate preallocated buffers).
+//
+// Shadertoy compatibility: each shader's `mainImage(out vec4 fragColor, vec2 fragCoord)`
+// is wrapped in a WebGL2 `main()` that supplies the standard uniforms and calls it.
+// We rename Shadertoy iChannel* to WebGL2 sampler uniforms and provide four
+// pre-allocated 256x256 placeholder textures (procedural noise / cubemap / gradient).
+
+(function (root) {
+	if (typeof module === 'object' && module.exports) {
+		module.exports = {};
+		return;
+	}
+
+	const VS = `#version 300 es
+precision highp float;
+out vec2 vUV;
+void main() {
+	// fullscreen tri covering clip-space [-1,1]
+	vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0);
+	vUV = (p + 1.0) * 0.5;
+	gl_Position = vec4(p, 0.0, 1.0);
+}`;
+
+	// Detect which iChannel*N* a shader uses as samplerCube by scanning the
+	// GLSL source for `texture*(iChannelN, vec3)`-style lookups. Returns
+	// 4-element array of booleans. Falls back to all-2D when nothing matches.
+	function detectCubeChannels(src) {
+		const flags = [false, false, false, false];
+		const re = /\btexture(?:Lod)?\s*\(\s*([A-Za-z_]\w*)\s*,\s*([^,)]+)/g;
+		let m;
+		while ((m = re.exec(src))) {
+			const sampler = m[1];
+			const idx = sampler === 'iChannel0' ? 0 : sampler === 'iChannel1' ? 1 : sampler === 'iChannel2' ? 2 : sampler === 'iChannel3' ? 3 : -1;
+			if (idx < 0) continue;
+			const coord = m[2];
+			if (/\bvec3\s*\(/.test(coord) || /\.[xyz]{2,3}\b/.test(coord)) {
+				flags[idx] = true;
+			}
+		}
+		return flags;
+	}
+
+	// Merge channel metadata hints (cube vs 2D) from the shader record.
+	// The metadata uses channel role names: "env_cube" -> samplerCube,
+	// everything else ("noise", "thickness", ...) -> sampler2D.
+	function resolveChannelKinds(src, channelsMeta) {
+		const auto = detectCubeChannels(src);
+		const out = [false, false, false, false];
+		for (let i = 0; i < 4; i++) {
+			if (channelsMeta && channelsMeta[String(i)] === 'env_cube') out[i] = true;
+			else out[i] = auto[i];
+		}
+		return out;
+	}
+
+	// Header we prepend to every shader. Declares uniforms matching Shadertoy.
+	// iChannel types are patched per-shader by buildFSHeader() to match detectCubeChannels.
+	function buildFSHeader(src, flags) {
+		// flags is the resolved [isCube0..3] array; default to all-2D
+		const lines = [
+			'#version 300 es',
+			'precision highp float;',
+			'precision highp int;',
+			'precision highp sampler2D;',
+			'precision highp samplerCube;',
+			'',
+			'uniform vec3  iResolution;',
+			'uniform float iTime;',
+			'uniform float iTimeDelta;',
+			'uniform int   iFrame;',
+			'uniform float iFrameRate;',
+			'uniform vec4  iMouse;',
+			'uniform vec4  iDate;',
+			'uniform ' + (flags[0] ? 'samplerCube' : 'sampler2D') + ' iChannel0;',
+			'uniform ' + (flags[1] ? 'samplerCube' : 'sampler2D') + ' iChannel1;',
+			'uniform ' + (flags[2] ? 'samplerCube' : 'sampler2D') + ' iChannel2;',
+			'uniform ' + (flags[3] ? 'samplerCube' : 'sampler2D') + ' iChannel3;',
+			'',
+			'out vec4 fragColor;',
+			'',
+		];
+		return lines.join('\n');
+	}
+
+	const FS_FOOTER = `
+void main() {
+	mainImage(fragColor, gl_FragCoord.xy);
+	fragColor.a = 1.0;
+}`;
+
+	const Runner = {
+		canvas: null,
+		gl: null,
+		program: null,
+		vao: null,
+		channels2D: null, // 4 preallocated sampler2D textures (RGBA8, 256x256)
+		channelsCube: null, // 4 preallocated samplerCube textures
+		channelIsCube: [false, false, false, false], // per-shader
+		uniformLocs: null,
+		current: null, // { id, title, ... }
+		running: false,
+		startTime: 0,
+		lastTime: 0,
+		frame: 0,
+		fps: 0,
+		fpsSamples: [],
+		fpsLast: 0,
+		mouse: [0, 0, 0, 0], // x, y, clickX, clickY in pixels
+		onError: null,
+	};
+
+	function makeNoiseTexture(gl) {
+		const N = 256;
+		const data = new Uint8Array(N * N * 4);
+		// value noise via cheap hash (deterministic, no allocations later)
+		// pre-bake once, mutate never
+		let s = 1;
+		for (let i = 0; i < N * N; i++) {
+			s = (s * 1664525 + 1013904223) >>> 0;
+			const r = (s & 0xff);
+			s = (s * 1664525 + 1013904223) >>> 0;
+			const g = (s & 0xff);
+			s = (s * 1664525 + 1013904223) >>> 0;
+			const b = (s & 0xff);
+			const j = i * 4;
+			data[j] = r; data[j+1] = g; data[j+2] = b; data[j+3] = 255;
+		}
+		// simple 3x3 box blur to soften
+		const out = new Uint8Array(N * N * 4);
+		for (let y = 0; y < N; y++) {
+			for (let x = 0; x < N; x++) {
+				let rr = 0, gg = 0, bb = 0, ct = 0;
+				for (let dy = -1; dy <= 1; dy++) {
+					for (let dx = -1; dx <= 1; dx++) {
+						const xx = (x + dx + N) % N;
+						const yy = (y + dy + N) % N;
+						const idx = (yy * N + xx) * 4;
+						rr += data[idx]; gg += data[idx+1]; bb += data[idx+2]; ct++;
+					}
+				}
+				const j = (y * N + x) * 4;
+				out[j] = rr / ct; out[j+1] = gg / ct; out[j+2] = bb / ct; out[j+3] = 255;
+			}
+		}
+		const tex = gl.createTexture();
+		gl.bindTexture(gl.TEXTURE_2D, tex);
+		gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, N, N, 0, gl.RGBA, gl.UNSIGNED_BYTE, out);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+		return tex;
+	}
+
+	function makeGradientTexture(gl, hueA, hueB) {
+		// 256x1 thin gradient stripe: useful for `thickness` lookups
+		const N = 256;
+		const data = new Uint8Array(N * 4);
+		for (let i = 0; i < N; i++) {
+			const t = i / (N - 1);
+			const r = Math.round(255 * (hueA[0] * (1 - t) + hueB[0] * t));
+			const g = Math.round(255 * (hueA[1] * (1 - t) + hueB[1] * t));
+			const b = Math.round(255 * (hueA[2] * (1 - t) + hueB[2] * t));
+			const j = i * 4;
+			data[j] = r; data[j+1] = g; data[j+2] = b; data[j+3] = 255;
+		}
+		const tex = gl.createTexture();
+		gl.bindTexture(gl.TEXTURE_2D, tex);
+		gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, N, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+		return tex;
+	}
+
+	// Cheap procedural cubemap: 32x32 per face, painted with a horizon gradient
+	// tinted by face direction. Looks like a "sky" — adequate stand-in for the
+	// Shadertoy envmap that thin-film shaders expect.
+	function makeCubeTexture(gl) {
+		const F = 32;
+		const tex = gl.createTexture();
+		gl.bindTexture(gl.TEXTURE_CUBE_MAP, tex);
+		// colors per face (px+, nx+, py+, ny+, pz+, nz+)
+		const palette = [
+			[0.95, 0.70, 0.50], // +x warm
+			[0.30, 0.45, 0.70], // -x cool
+			[0.90, 0.92, 0.98], // +y bright sky
+			[0.20, 0.18, 0.22], // -y dark floor
+			[0.80, 0.85, 0.55], // +z yellow
+			[0.55, 0.40, 0.65], // -z purple
+		];
+		const faceData = [];
+		for (let f = 0; f < 6; f++) {
+			const data = new Uint8Array(F * F * 4);
+			for (let y = 0; y < F; y++) {
+				for (let x = 0; x < F; x++) {
+					// y goes 0 (top) -> F-1 (bottom); invert for sky-to-floor
+					const t = y / (F - 1);
+					const base = palette[f];
+					const dim = 0.55 + 0.45 * (1 - t); // top brighter
+					const j = (y * F + x) * 4;
+					data[j]   = Math.min(255, Math.round(255 * base[0] * dim));
+					data[j+1] = Math.min(255, Math.round(255 * base[1] * dim));
+					data[j+2] = Math.min(255, Math.round(255 * base[2] * dim));
+					data[j+3] = 255;
+				}
+			}
+			faceData.push({ face: f, data: data });
+		}
+		const faces = [gl.TEXTURE_CUBE_MAP_POSITIVE_X, gl.TEXTURE_CUBE_MAP_NEGATIVE_X,
+			gl.TEXTURE_CUBE_MAP_POSITIVE_Y, gl.TEXTURE_CUBE_MAP_NEGATIVE_Y,
+			gl.TEXTURE_CUBE_MAP_POSITIVE_Z, gl.TEXTURE_CUBE_MAP_NEGATIVE_Z];
+		for (let i = 0; i < 6; i++) {
+			gl.texImage2D(faces[i], 0, gl.RGBA8, F, F, 0, gl.RGBA, gl.UNSIGNED_BYTE, faceData[i].data);
+		}
+		gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+		gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+		return tex;
+	}
+
+	function compile(gl, type, src) {
+		const sh = gl.createShader(type);
+		gl.shaderSource(sh, src);
+		gl.compileShader(sh);
+		if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+			const log = gl.getShaderInfoLog(sh);
+			gl.deleteShader(sh);
+			throw new Error('shader compile failed:\n' + log + '\n--- source ---\n' + src);
+		}
+		return sh;
+	}
+
+	function link(gl, vs, fs) {
+		const prog = gl.createProgram();
+		gl.attachShader(prog, vs);
+		gl.attachShader(prog, fs);
+		gl.linkProgram(prog);
+		if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+			const log = gl.getProgramInfoLog(prog);
+			gl.deleteProgram(prog);
+			throw new Error('program link failed:\n' + log);
+		}
+		return prog;
+	}
+
+	function getUniformLocs(gl, prog) {
+		const names = [
+			'iResolution', 'iTime', 'iTimeDelta', 'iFrame', 'iFrameRate',
+			'iMouse', 'iDate',
+			'iChannel0', 'iChannel1', 'iChannel2', 'iChannel3',
+		];
+		const out = {};
+		for (let i = 0; i < names.length; i++) out[names[i]] = gl.getUniformLocation(prog, names[i]);
+		return out;
+	}
+
+	function resize(canvas) {
+		const dpr = Math.min(window.devicePixelRatio || 1, 2);
+		const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+		const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+		if (canvas.width !== w || canvas.height !== h) {
+			canvas.width = w;
+			canvas.height = h;
+		}
+		return [w, h];
+	}
+
+	function dateVec() {
+		const d = new Date();
+		return [d.getFullYear(), d.getMonth() + 1, d.getDate(), d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()];
+	}
+
+	function init(canvas) {
+		Runner.canvas = canvas;
+		const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+		if (!gl) throw new Error('WebGL2 not supported');
+		Runner.gl = gl;
+
+		// pre-allocated VAO (fullscreen tri via gl_VertexID)
+		const vao = gl.createVertexArray();
+		gl.bindVertexArray(vao);
+		gl.bindVertexArray(null);
+		Runner.vao = vao;
+
+		// preallocated channel textures
+		const channels2D = [
+			makeNoiseTexture(gl),                         // ch0
+			makeGradientTexture(gl, [0.1,0.4,1.0], [1,1,0.2]), // ch1 thin-film thickness-ish
+			makeNoiseTexture(gl),                         // ch2 noise variant
+			makeNoiseTexture(gl),                         // ch3 spare
+		];
+		const channelsCube = [
+			makeCubeTexture(gl),
+			makeCubeTexture(gl),
+			makeCubeTexture(gl),
+			makeCubeTexture(gl),
+		];
+		Runner.channels2D = channels2D;
+		Runner.channelsCube = channelsCube;
+
+		Runner.onError = Runner.onError || function () {};
+		window.addEventListener('resize', () => { /* handled in frame */ });
+		canvas.addEventListener('mousemove', (e) => {
+			const r = canvas.getBoundingClientRect();
+			Runner.mouse[0] = (e.clientX - r.left) * (canvas.width / r.width);
+			Runner.mouse[1] = (e.clientY - r.top) * (canvas.height / r.height);
+		});
+		canvas.addEventListener('mousedown', (e) => {
+			const r = canvas.getBoundingClientRect();
+			Runner.mouse[2] = (e.clientX - r.left) * (canvas.width / r.width);
+			Runner.mouse[3] = (e.clientY - r.top) * (canvas.height / r.height);
+		});
+		canvas.addEventListener('mouseup', () => { Runner.mouse[2] = 0; Runner.mouse[3] = 0; });
+
+		return root.Runner;
+	}
+
+	function select(id) {
+		const list = window.SHADERS || [];
+		let meta = null;
+		for (let i = 0; i < list.length; i++) if (list[i].id === id) { meta = list[i]; break; }
+		if (!meta) throw new Error('unknown shader id: ' + id);
+		const gl = Runner.gl;
+		const flags = resolveChannelKinds(meta.source, meta.channels);
+		for (let i = 0; i < 4; i++) Runner.channelIsCube[i] = flags[i];
+		const header = buildFSHeader(meta.source, flags);
+		const src = header + meta.source + FS_FOOTER;
+		const vs = compile(gl, gl.VERTEX_SHADER, VS);
+		const fs = compile(gl, gl.FRAGMENT_SHADER, src);
+		const prog = link(gl, vs, fs);
+		gl.deleteShader(vs);
+		gl.deleteShader(fs);
+		if (Runner.program) gl.deleteProgram(Runner.program);
+		Runner.program = prog;
+		Runner.uniformLocs = getUniformLocs(gl, prog);
+		Runner.current = meta;
+		Runner.startTime = performance.now();
+		Runner.lastTime = Runner.startTime;
+		Runner.frame = 0;
+		Runner.fpsSamples.length = 0;
+		return meta;
+	}
+
+	function bindChannel(gl, prog, locs, idx) {
+		const unit = gl.TEXTURE0 + idx;
+		gl.activeTexture(unit);
+		if (Runner.channelIsCube[idx]) {
+			gl.bindTexture(gl.TEXTURE_CUBE_MAP, Runner.channelsCube[idx]);
+		} else {
+			gl.bindTexture(gl.TEXTURE_2D, Runner.channels2D[idx]);
+		}
+		gl.uniform1i(locs['iChannel' + idx], idx);
+	}
+
+	function frame() {
+		if (!Runner.running) return;
+		const gl = Runner.gl;
+		const t = performance.now();
+		const dt = (t - Runner.lastTime) / 1000;
+		Runner.lastTime = t;
+		const elapsed = (t - Runner.startTime) / 1000;
+
+		const wh = resize(Runner.canvas);
+		gl.viewport(0, 0, wh[0], wh[1]);
+
+		gl.useProgram(Runner.program);
+		const u = Runner.uniformLocs;
+		if (u.iResolution) gl.uniform3f(u.iResolution, wh[0], wh[1], 1.0);
+		if (u.iTime) gl.uniform1f(u.iTime, elapsed);
+		if (u.iTimeDelta) gl.uniform1f(u.iTimeDelta, dt);
+		if (u.iFrame) gl.uniform1i(u.iFrame, Runner.frame);
+		if (u.iFrameRate) gl.uniform1f(u.iFrameRate, dt > 0 ? 1.0 / dt : 0);
+		if (u.iMouse) gl.uniform4fv(u.iMouse, Runner.mouse);
+		if (u.iDate) {
+			const d = dateVec();
+			gl.uniform4f(u.iDate, d[0], d[1], d[2], d[3]);
+		}
+		bindChannel(gl, Runner.program, u, 0);
+		bindChannel(gl, Runner.program, u, 1);
+		bindChannel(gl, Runner.program, u, 2);
+		bindChannel(gl, Runner.program, u, 3);
+
+		gl.bindVertexArray(Runner.vao);
+		gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+		Runner.frame++;
+		// rolling FPS, computed from sample timestamps only
+		Runner.fpsSamples.push(t);
+		while (Runner.fpsSamples.length > 30) Runner.fpsSamples.shift();
+		if (Runner.fpsSamples.length >= 2) {
+			const span = (Runner.fpsSamples[Runner.fpsSamples.length - 1] - Runner.fpsSamples[0]) / 1000;
+			Runner.fps = span > 0 ? (Runner.fpsSamples.length - 1) / span : 0;
+		}
+		requestAnimationFrame(frame);
+	}
+
+	function run() {
+		if (!Runner.program) throw new Error('no shader selected');
+		Runner.running = true;
+		Runner.startTime = performance.now();
+		Runner.lastTime = Runner.startTime;
+		requestAnimationFrame(frame);
+	}
+
+	function stop() { Runner.running = false; }
+
+	function stats() {
+		return {
+			id: Runner.current ? Runner.current.id : null,
+			fps: Runner.fps,
+			frame: Runner.frame,
+			res: [Runner.canvas.width, Runner.canvas.height],
+		};
+	}
+
+	root.Runner = { init, select, run, stop, stats };
+})(typeof window !== 'undefined' ? window : globalThis);
