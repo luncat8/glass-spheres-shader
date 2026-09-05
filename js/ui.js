@@ -7,6 +7,7 @@
 	let runner;
 	let firstShader = null;
 	let pendingErr = '';
+	let lastFpsTick = 0;
 
 	function setErr(msg) {
 		errEl.textContent = msg || '';
@@ -201,8 +202,14 @@
 	}
 
 	function tick() {
-		const s = runner.stats();
-		fpsEl.textContent = (s.fps || 0).toFixed(1) + ' fps · ' + s.res[0] + 'x' + s.res[1] + ' · frame ' + s.frame;
+		const now = performance.now();
+		// throttle DOM updates to ~4Hz; the FPS itself is already a 500ms
+		// average so a faster refresh adds noise without adding signal
+		if (now - lastFpsTick >= 250) {
+			lastFpsTick = now;
+			const s = runner.stats();
+			fpsEl.textContent = (s.fps || 0).toFixed(1) + ' fps · ' + s.res[0] + 'x' + s.res[1] + ' · frame ' + s.frame;
+		}
 		requestAnimationFrame(tick);
 	}
 

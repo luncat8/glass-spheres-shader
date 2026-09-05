@@ -29,7 +29,15 @@
 		{ label: '320 × 180', w: 320, h: 180 },
 		{ label: '640 × 360', w: 640, h: 360 },
 		{ label: '1024 × 576', w: 1024, h: 576 },
+		{ label: '2560 × 1440', w: 2560, h: 1440 },
 	];
+	// pixel-proportional resolution thresholds (calibrated at CALIB_RES):
+	//   cheap shaders scale linearly with pixels, so the median at 640x360
+	//   predicts whether the next resolution step will stay inside budget.
+	//   each step multiplies pixels by ~2.5x (RES[1]->RES[2]) or ~6.9x (RES[2]->RES[3])
+	const STEP_DOWN_MS = 18;        // predicted cost >25ms => drop one res step
+	const SKIP_ONE_STEP_MS = 8;     // calib <8ms at 640x360 => can jump one step up
+	const SKIP_TWO_STEPS_MS = 2.5;  // calib <2.5ms at 640x360 => can jump to top res
 	const CALIB_RES = RES[1];       // cheap entry is calibrated at 640x360
 	const CALIB_FRAMES = 18;        // measured frames during calibration
 	const WARMUP = 6;               // warm-up frames per entry (driver caches, JIT)
@@ -37,8 +45,6 @@
 	const HARD_FRAME_MS = 400;      // a single frame above this aborts the entry
 	const MIN_SAMPLES = 6;          // fewer samples than this => "timeout"
 	const ENTRY_TIMEOUT_MS = 20000; // wall-clock budget per entry (incl. warm-up)
-	const STEP_DOWN_MS = 26;        // median above this at 640x360 => drop res
-	const STEP_UP_MS = 5;           // median below this at 640x360 => raise res
 	const SANITY_EDGE = 4;          // rgb range below this => "blank?" warning
 
 	// fixed bench camera, identical for every entry and every machine
@@ -132,11 +138,11 @@
 	}
 
 	function rowText(e, text) {
-		if (e._met) e._met.textContent = text;
+		if (e && e._met) e._met.textContent = text;
 	}
 
 	function setRow(e, cls) {
-		if (!e._row) return;
+		if (!e || !e._row) return;
 		if (cls) e._row.className = 'bench-row ' + cls;
 		else e._row.className = 'bench-row';
 	}
@@ -161,6 +167,7 @@
 		addOpt(countSel, '16', '16');
 		addOpt(countSel, '32', '32');
 		addOpt(countSel, '64', '64');
+		addOpt(countSel, '128', '128');
 		countSel.value = '64';
 		set.appendChild(countSel);
 		set.appendChild(el('label', '', ' render '));
@@ -174,7 +181,7 @@
 		addOpt(samplesSel, '20', '20');
 		addOpt(samplesSel, '40', '40');
 		addOpt(samplesSel, '60', '60');
-		samplesSel.value = '40';
+		samplesSel.value = '60';
 		set.appendChild(samplesSel);
 		panel.appendChild(set);
 
@@ -196,7 +203,7 @@
 
 		noteEl = el('div', 'bench-note',
 			'All entries render the same bubble cloud (same positions, camera, env and resolution). ' +
-			'Score = median GPU ms/frame via gl.finish(), so display refresh limits don\'t skew it. ' +
+			'Score = median GPU ms/frame — measured with EXT_disjoint_timer_query_webgl2 when available, otherwise via gl.finish() — so display refresh limits don\'t skew it. ' +
 			'Resolution adapts and heavy shaders are skipped instead of freezing.');
 		panel.appendChild(noteEl);
 
@@ -249,7 +256,14 @@
 		const base = e.meta || {};
 		const out = { arrays: [], params: [], vars: [] };
 		const as = base.arrays || [];
-		for (let i = 0; i < as.length; i++) out.arrays.push(Object.assign({}, as[i], { count: count }));
+		for (let i = 0; i < as.length; i++) {
+			const a = Object.assign({}, as[i], { count: count });
+			// pick a feed that can actually fill `count` slots, so 128 bubbles
+			// get 128 distinct positions instead of 64 + 64 zero-vectors
+			if (a.feed === 'bubbles64' && count > 64) a.feed = 'bubbles128';
+			if (a.feed === 'bubbles128' && count <= 64) a.feed = 'bubbles64';
+			out.arrays.push(a);
+		}
 		const ps = base.params || [];
 		for (let i = 0; i < ps.length; i++) {
 			const p = Object.assign({}, ps[i]);
@@ -294,6 +308,63 @@
 	}
 
 	const VAR_SLOT = { uCamPos: 0, uCamRt: 1, uCamUp: 2, uCamFw: 3 };
+
+	// optional true GPU timer: EXT_disjoint_timer_query_webgl2.
+	// Falls back to gl.finish() wall time if the extension is missing.
+	let GPU_TIMER_EXT = null;
+	let gpuTimerAvail = false;
+	function initTimerQuery(gl) {
+		GPU_TIMER_EXT = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+		gpuTimerAvail = !!GPU_TIMER_EXT;
+	}
+	const pendingQueries = []; // queries whose result hasn't been read yet
+	const gpuQueryPool = [];   // reusable WebGLQuery objects
+
+	function getQuery(gl) {
+		if (gpuQueryPool.length) return gpuQueryPool.pop();
+		return gl.createQuery && gl.createQuery();
+	}
+	function recycleQuery(gl, q) {
+		if (q) gpuQueryPool.push(q);
+	}
+
+	function beginGpuTimer(gl) {
+		if (!gpuTimerAvail) return null;
+		const q = getQuery(gl);
+		if (!q) return null;
+		gl.beginQuery(GPU_TIMER_EXT.TIME_ELAPSED_EXT, q);
+		return q;
+	}
+	function endGpuTimer(gl, q) {
+		if (!gpuTimerAvail || !q) return;
+		gl.endQuery(GPU_TIMER_EXT.TIME_ELAPSED_EXT);
+		pendingQueries.push(q);
+	}
+
+	// read all finished queries; returns an array of nanosecond durations and
+	// recycles the query objects. Polls ~1ms at most per call.
+	function pollGpuTimers(gl) {
+		if (!gpuTimerAvail) return [];
+		const out = [];
+		for (let i = pendingQueries.length - 1; i >= 0; i--) {
+			const q = pendingQueries[i];
+			const avail = gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE);
+			const disjoint = gl.getParameter(GPU_TIMER_EXT.GPU_DISJOINT_EXT);
+			if (avail && !disjoint) {
+				const ns = gl.getQueryParameter(q, gl.QUERY_RESULT);
+				out.push(ns);
+				pendingQueries.splice(i, 1);
+				recycleQuery(gl, q);
+			} else if (!avail) {
+				// leave in queue; try again next poll
+			} else {
+				// disjoint (timestamp unreliable): drop the sample
+				pendingQueries.splice(i, 1);
+				recycleQuery(gl, q);
+			}
+		}
+		return out;
+	}
 
 	function drawFrame(gl, cur, w, h, frame) {
 		if (S.cv.width !== w || S.cv.height !== h) {
@@ -340,7 +411,23 @@
 
 		gl.bindVertexArray(S.vao);
 		gl.drawArrays(gl.TRIANGLES, 0, 3);
-		gl.finish();
+		// only finish() when we have no GPU timer (the timer query already
+		// provides a precise GPU-completion signal, and finish() adds a stall)
+		if (!gpuTimerAvail) gl.finish();
+	}
+
+	// measures one frame and returns {gpuMs, query} where query is a pending
+	// GPU timer query (consumed on a later step) or null when no timer.
+	function measureFrame(gl, cur, w, h, frame) {
+		const q = beginGpuTimer(gl);
+		const t0 = performance.now();
+		drawFrame(gl, cur, w, h, frame);
+		const gpuWall = performance.now() - t0;
+		if (q) {
+			endGpuTimer(gl, q);
+			return { gpuMs: null, query: q, wallMs: gpuWall };
+		}
+		return { gpuMs: gpuWall, query: null, wallMs: gpuWall };
 	}
 
 	const readBuf = new Uint8Array(8 * 8 * 4);
@@ -369,6 +456,7 @@
 		gl.bindVertexArray(vao);
 		gl.bindVertexArray(null);
 		S.vao = vao;
+		initTimerQuery(gl);
 		return true;
 	}
 
@@ -377,8 +465,6 @@
 		if (!panel) return; // UI not built yet
 		S.entries = collectEntries();
 		if (!S.entries.length) { note('no benchmark shaders loaded'); return; }
-		if (!initGL()) { note('benchmark needs WebGL2'); return; }
-		if (root.Runner) root.Runner.stop(); // pause the live preview while measuring
 
 		S.running = true;
 		S.results.length = 0;
@@ -387,6 +473,9 @@
 		runBtn.disabled = true;
 		abortBtn.disabled = false;
 		closeBtn.disabled = true;
+		countSel.disabled = true;
+		resSel.disabled = true;
+		samplesSel.disabled = true;
 
 		const settings = {
 			count: parseInt(countSel.value, 10),
@@ -411,6 +500,24 @@
 			sane: true,
 			aborted: false,
 		};
+
+		try {
+			if (!initGL()) { note('benchmark needs WebGL2'); throw new Error('webgl2 unavailable'); }
+			if (root.Runner) root.Runner.stop(); // pause the live preview while measuring
+		} catch (err) {
+			// GL init / scene pause failed: roll back the running flag so the user
+			// can recover instead of being stuck with disabled buttons.
+			S.running = false;
+			runBtn.disabled = false;
+			abortBtn.disabled = true;
+			closeBtn.disabled = false;
+			countSel.disabled = false;
+			resSel.disabled = false;
+			samplesSel.disabled = false;
+			note('benchmark error: ' + String(err.message || err));
+			return;
+		}
+
 		note('preparing…');
 		requestAnimationFrame(step);
 	}
@@ -450,7 +557,7 @@
 
 	function entryDone(hardReason) {
 		const st = S.st;
-		const e = st.entry;
+		const e = st && st.entry;
 		if (!e) return;
 		const gpu = median(st.samples);
 		const wall = median(st.wall);
@@ -477,6 +584,13 @@
 		runBtn.disabled = false;
 		abortBtn.disabled = true;
 		closeBtn.disabled = false;
+		countSel.disabled = false;
+		resSel.disabled = false;
+		samplesSel.disabled = false;
+		// drain in-flight GPU timer queries so they don't leak
+		while (pendingQueries.length) {
+			recycleQuery(S.gl, pendingQueries.pop());
+		}
 		if (root.Runner) root.Runner.run(); // resume the live preview
 
 		const ok = S.results.filter((r) => r.ok);
@@ -509,6 +623,12 @@
 		runBtn.disabled = false;
 		abortBtn.disabled = true;
 		closeBtn.disabled = false;
+		countSel.disabled = false;
+		resSel.disabled = false;
+		samplesSel.disabled = false;
+		while (pendingQueries.length) {
+			recycleQuery(S.gl, pendingQueries.pop());
+		}
 		if (root.Runner) root.Runner.run();
 		note('benchmark error: ' + msg);
 	}
@@ -518,16 +638,21 @@
 		const st = S.st;
 		if (st) {
 			st.aborted = true;
-			if (st.entry && st.entry._met) rowText(st.entry, 'aborted');
+			if (st.entry) rowText(st.entry, 'aborted');
 			for (let i = st.idx + 1; i < S.entries.length; i++) {
-				const e = S.entries[i];
-				if (e._met) rowText(e, 'aborted');
+				rowText(S.entries[i], 'aborted');
 			}
 		}
 		S.running = false;
 		runBtn.disabled = false;
 		abortBtn.disabled = true;
 		closeBtn.disabled = false;
+		countSel.disabled = false;
+		resSel.disabled = false;
+		samplesSel.disabled = false;
+		while (pendingQueries.length) {
+			recycleQuery(S.gl, pendingQueries.pop());
+		}
 		if (root.Runner) root.Runner.run();
 		note('benchmark aborted');
 	}
@@ -569,11 +694,19 @@
 					st.entryStart = performance.now();
 				}
 			} else { // measure
-				const t0 = performance.now();
-				drawFrame(S.gl, st.cur, st.res.w, st.res.h, st.frame);
-				const gpu = performance.now() - t0;
+				// poll any finished timer-query frames and fold them into samples
+				if (gpuTimerAvail && pendingQueries.length) {
+					const ns = pollGpuTimers(S.gl);
+					for (let i = 0; i < ns.length; i++) {
+						st.samples.push(ns[i] / 1e6); // ns -> ms
+					}
+				}
+
+				const m = measureFrame(S.gl, st.cur, st.res.w, st.res.h, st.frame);
 				st.wall.push(wallMs);
-				st.samples.push(gpu);
+				// without a GPU timer, every frame contributes a sample now
+				// (drawFrame calls gl.finish() so this is honest GPU work)
+				if (!gpuTimerAvail) st.samples.push(m.gpuMs);
 				st.frame++;
 				if (st.samples.length === 1) st.sane = !looksBlank(S.gl);
 
@@ -581,17 +714,36 @@
 				const elTotal = performance.now() - st.entryStart;
 				const isCalibEnd = st.isCalib && st.samples.length >= CALIB_FRAMES;
 				const isEntryEnd = st.samples.length >= st.settings.samples || elTotal > ENTRY_TIMEOUT_MS;
-				const heavy = gpu > HARD_FRAME_MS;
+				// wall-time check: with timer queries we don't know per-frame
+				// GPU ms yet, so fall back to wall for the heavy-cut
+				const heavy = m.wallMs > HARD_FRAME_MS;
 
 				if (st.isCalib) {
 					if (isCalibEnd || heavy) {
 						const med = median(st.samples);
-						st.res = med > STEP_DOWN_MS ? RES[0]
-							: med < STEP_UP_MS ? RES[2] : RES[1];
-						note('calibrated to ' + st.res.label + ' (median ' + fmtMs(med) + ' ms) — ' +
+						// pick the highest resolution that should still finish in budget.
+						// start at the top (RES.length-1) and walk down until the predicted
+						// cost at calib-res * pixel-ratio is under STEP_DOWN_MS.
+						let pick = RES.length - 1;
+						while (pick > 0) {
+							const px = RES[pick].w * RES[pick].h;
+							const calPx = CALIB_RES.w * CALIB_RES.h;
+							const predicted = med * (px / calPx);
+							if (predicted <= STEP_DOWN_MS) break;
+							pick--;
+						}
+						// but if calib was so cheap we could've skipped a step, jump up
+						if (med < SKIP_TWO_STEPS_MS && RES.length >= 4) pick = RES.length - 1;
+						else if (med < SKIP_ONE_STEP_MS && RES.length >= 3) pick = Math.max(pick, RES.length - 2);
+						st.res = RES[pick];
+						note('calibrated to ' + st.res.label + ' (median ' + fmtMs(med) + ' ms @ ' + CALIB_RES.label + ') — ' +
 							'now measuring ' + S.entries.length + ' shaders at ' + st.settings.count + ' bubbles');
 						st.isCalib = false;
 						st.idx = -1;
+						// drop any pending queries: calibration is no longer representative
+						while (pendingQueries.length) {
+							recycleQuery(S.gl, pendingQueries.pop());
+						}
 						nextEntry();
 					}
 				} else {

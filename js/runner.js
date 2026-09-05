@@ -132,9 +132,7 @@ void main() {
 		startTime: 0,
 		lastTime: 0,
 		frame: 0,
-		fps: 0,
 		fpsSamples: [],
-		fpsLast: 0,
 		elapsed: 0, // seconds since the current shader was selected
 		mouse: [0, 0, 0, 0], // x, y, clickX, clickY in pixels
 		onError: null,
@@ -497,13 +495,9 @@ void main() {
 		gl.drawArrays(gl.TRIANGLES, 0, 3);
 
 		Runner.frame++;
-		// rolling FPS, computed from sample timestamps only
+		// raw frame timestamps; the smoothed FPS is computed in ui.tick()
 		Runner.fpsSamples.push(t);
-		while (Runner.fpsSamples.length > 30) Runner.fpsSamples.shift();
-		if (Runner.fpsSamples.length >= 2) {
-			const span = (Runner.fpsSamples[Runner.fpsSamples.length - 1] - Runner.fpsSamples[0]) / 1000;
-			Runner.fps = span > 0 ? (Runner.fpsSamples.length - 1) / span : 0;
-		}
+		if (Runner.fpsSamples.length > 240) Runner.fpsSamples.shift();
 		requestAnimationFrame(frame);
 	}
 
@@ -515,12 +509,27 @@ void main() {
 		requestAnimationFrame(frame);
 	}
 
-	function stop() { Runner.running = false; }
+	function stop() { Runner.running = false; Runner.fpsSamples.length = 0; }
+
+	// 500ms sliding-window FPS — averages over enough frames to be stable but
+	// still reacts within half a second to a sustained change.
+	const FPS_WINDOW_MS = 500;
+	function smoothFps() {
+		const s = Runner.fpsSamples;
+		const n = s.length;
+		if (n < 2) return 0;
+		const newest = s[n - 1];
+		let i = n - 2;
+		while (i > 0 && newest - s[i] < FPS_WINDOW_MS) i--;
+		const span = (newest - s[i]) / 1000;
+		const frames = (n - 1) - i;
+		return span > 0 ? frames / span : 0;
+	}
 
 	function stats() {
 		return {
 			id: Runner.current ? Runner.current.id : null,
-			fps: Runner.fps,
+			fps: smoothFps(),
 			frame: Runner.frame,
 			res: [Runner.canvas.width, Runner.canvas.height],
 		};
