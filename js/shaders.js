@@ -6,7 +6,7 @@
 		module.exports = { SHADERS: [] };
 		return;
 	}
-	const ids = ['XdXXzB', 'llsSDf', 'ld3SDl'];
+	const ids = ['XdXXzB', 'llsSDf', 'ld3SDl', 'multi_fresnel', 'multi_thinfilm', 'thick_glass'];
 	const list = [];
 	for (let i = 0; i < ids.length; i++) {
 		const s = window['SHADER_' + ids[i]];

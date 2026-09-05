@@ -10,6 +10,11 @@
 	#bar button { background: #2a2a2a; color: #ddd; border: 1px solid #3a3a3a; padding: 4px 10px; cursor: pointer; font: inherit; }
 	#bar button.active { background: #396; color: #000; }
 	#bar button:hover { background: #3a3a3a; }
+	#bar a.stlink { color: #8cf; text-decoration: none; margin-left: 4px; font-size: 11px; border: 1px solid #2a4a6a; padding: 0 4px; border-radius: 2px; }
+	#bar a.stlink:hover { background: #2a4a6a; color: #cef; }
+	#bar span.shader-item { display: inline-flex; align-items: center; gap: 4px; }
+	#meta a.stlink { color: #8cf; text-decoration: none; margin-left: 8px; font-size: 11px; border: 1px solid #2a4a6a; padding: 1px 5px; border-radius: 2px; }
+	#meta a.stlink:hover { background: #2a4a6a; color: #cef; }
 	#stage { position: relative; background: #000; overflow: hidden; }
 	#c { display: block; width: 100%; height: 100%; image-rendering: auto; }
 	#status { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.5); padding: 4px 8px; border-radius: 3px; }
@@ -21,9 +26,7 @@
 <div id="app">
 	<div id="bar">
 		<strong style="color:#888">shader:</strong>
-		<button data-id="XdXXzB" title="single-sphere renderer, no multi-bubble support">XdXXzB (sphere fresnel) — 1 bubble only</button>
-		<button data-id="llsSDf" title="Voronoi-style multi-bubble cells">llsSDf (bubble cells)</button>
-		<button data-id="ld3SDl" title="single implicit-surface thin-film, no multi-bubble support">ld3SDl (thin-film) — 1 bubble only</button>
+		<span id="shader-buttons"></span>
 		<span style="flex:1"></span>
 		<span id="fps" style="color:#888">-- fps</span>
 	</div>
@@ -36,9 +39,12 @@
 		<div id="err" style="flex:1"></div>
 	</div>
 </div>
-<script src="shaders/XdXXzB.js"></script>
-<script src="shaders/llsSDf.js"></script>
-<script src="shaders/ld3SDl.js"></script>
+	<script src="shaders/XdXXzB.js"></script>
+	<script src="shaders/llsSDf.js"></script>
+	<script src="shaders/ld3SDl.js"></script>
+	<script src="shaders/multi_fresnel.js"></script>
+	<script src="shaders/multi_thinfilm.js"></script>
+	<script src="shaders/thick_glass.js"></script>
 <script src="js/shaders.js"></script>
 <script src="js/runner.js"></script>
 <script src="js/ui.js"></script>

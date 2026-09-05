@@ -3,8 +3,186 @@
 // no fetch). Exposes window.SHADER_<ID> = { id, title, author, channels, source }.
 window.SHADER_XdXXzB = {
   "id": "XdXXzB",
-  "title": "XdXXzB - refractive sphere with fbm fresnel",
-  "author": "shadertoy XdXXzB",
-  "channels": {"0": "env_cube", "1": "env_cube", "2": "noise", "3": "noise"},
-  "source": "#define PI \t\t\t3.14159265359\n#define SPHERE \t\tvec4 (0.0, 0.0, 0.0, 2.0)\n#define FOV \t\t60.0\n\n#define RI_AIR\t\t1.000293\n#define RI_SPH\t\t1.55\n\n#define ETA \t\t(RI_AIR/RI_SPH)\n#define R\t\t\t-0.02\n\n#define FR_BIAS\t\t0.0\n#define FR_SCALE\t1.0\n#define FR_POWER\t0.7\n\n#define FR0\t\t\tvec3 (0.0, 1.0, 0.7)\n\n#define PI 3.14159265359\n\nfloat noise (vec2 co) {\n  return length (texture (iChannel2, co));\n}\n\nmat2 rotate (float fi) {\n\tfloat cfi = cos (fi);\n\tfloat sfi = sin (fi);\n\treturn mat2 (-sfi, cfi, cfi, sfi);\n}\n\nvec3 hsv2rgb (vec3 c) {\n    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);\n    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);\n    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);\n}\n\nfloat fbm ( vec2 uv) {\n\treturn (\n\t\t+noise (uv*2.0)/2.0\n\t\t+noise (uv*4.0)/4.0\n\t\t+noise (uv*8.0)/8.0\n\t\t+noise (uv*16.0)/16.0\n\t\t+noise (uv*32.0)/32.0\n\t);\n}\n\nvec4 compute (vec2 uv, float iTime) {\t\n\tuv *= rotate (PI * 0.5 * fbm (uv/256.0) * length (uv) + iTime);\n\tuv = (iTime+uv)/196.0;\n\tvec3 col = vec3 (fbm (uv)*PI*2.0, 1.0, 1.0);\t\n\treturn vec4 (hsv2rgb (col),1.0) ;\n}\n\t\t\t  \nmat3 rotate_x (float fi) {\n\tfloat cfi = cos (fi);\n\tfloat sfi = sin (fi);\n\treturn mat3 (\n\t\t1.0, 0.0, 0.0,\n\t\t0.0, cfi, -sfi,\n\t\t0.0, sfi, cfi);\n}\n\nmat3 rotate_y (float fi) {\n\tfloat cfi = cos (fi);\n\tfloat sfi = sin (fi);\n\treturn mat3 (\n\t\tcfi, 0.0, sfi,\n\t\t0.0, 1.0, 0.0,\n\t\t-sfi, 0.0, cfi);\n}\n\nmat3 rotate_z (float fi) {\n\tfloat cfi = cos (fi);\n\tfloat sfi = sin (fi);\n\treturn mat3 (\n\t\tcfi, -sfi, 0.0,\n\t\tsfi, cfi, 0.0,\n\t\t0.0, 0.0, 1.0);\n}\n\nvec4 noise4v (vec2 p) {\n\treturn texture (iChannel2, p);\n}\n\nvec4 fbm4v (vec2 p) {\n\tvec4 f = vec4 (0.0);\n\tf += 0.5000 * noise4v (p); p *= 2.01;\n\tf += 0.2500 * noise4v (p); p *= 2.02;\n\tf += 0.1250 * noise4v (p); p *= 2.03;\n\tf += 0.0625 * noise4v (p); p *= 2.04;\n\tf /= 0.9375;\n\treturn f;\n}\n\nvec4 fbm3d4v (vec3 p, float s) {\t\n\treturn \n\t\tcompute (p.xy, iTime/s) * abs (p.z) +\n\t\tcompute (p.xz, iTime/s) * abs (p.y) +\n\t\tcompute (p.yz, iTime/s) * abs (p.x);\n}\n\nfloat sphere_intersect (in vec3 o, in vec3 d, in vec4 c, out float t0, out float t1) {\n\tvec3 oc = o - c.xyz;\n\tfloat A = dot (d, d);\n\tfloat B = 2.0 * dot (oc, d);\n\tfloat C = dot (oc, oc) - c.w;\n\tfloat D = B*B - 4.0*A*C;\n\tfloat q = (-B - sqrt (D) * sign (B))/2.0;\n\tfloat _t0 = q/A;\n\tfloat _t1 = C/q;\n\tt0 = min (_t0, _t1);\n\tt1 = max (_t0, _t1);\n\treturn step (0.0, D);\n}\n\nfloat fresnel_step (vec3 I, vec3 N, vec3 f) {\n\treturn clamp (f.x + f.y * pow (1.0 + dot (I, N), f.z), 0.0, 1.0);\n}\n\nvec2 to_spherical_normalized (vec3 pt) {\n\tfloat r = length (pt);\n\treturn vec2 (acos (pt.z / r)/PI, atan (pt.y, pt.x)/PI + 0.5); \n}\n\nvec3 spherical (vec3 cart) {\n\tfloat r = length (cart);\n\tfloat i = (acos (cart.z/r)/(PI/2.0) - 0.5)*2.0;\n\tfloat a = atan (cart.y, cart.x)/PI;\n\treturn vec3 (r, a, i);\n}\n\nvoid mainImage( out vec4 fragColor, in vec2 fragCoord ) {\n\tvec2 uv = (2.0*fragCoord.xy - iResolution.xy)/min (iResolution.x, iResolution.y) * tan (radians (FOV)/2.0);\n\tvec2 mo = PI * iMouse.xy / iResolution.xy;\n\t\n\tvec3 up = vec3 (0.0, 1.0, 0.0); \t\t\t// up \n\tvec3 fw = vec3 (0.0, 0.0, 1.0) * \t\t\t// forward\n\t\trotate_y (mo.x * PI); \t\t\t\t\n\tvec3 lf = cross (up, fw); \t\t\t\t\t// left\n\t\n\tvec3 ro = -fw * 5.0; \t\t\t\t\t\t// ray origin\n\tvec3 rd = normalize (uv.x * lf + uv.y * up + fw) ; \t\t// ray direction\n\tvec3 rn = rd;\n\tvec3 dr = fbm4v (uv/64.0 + sin (iTime/128.0)).xyz - 0.5;\n\t//rd = normalize (rd + dr/32.0);\n\t\n\tvec4 sp = SPHERE + \t\t\t\t\t\n\t\tvec4 (0.0, 1.0, 0.0, 0.0)*sin (iTime); \t\t\t\t\t\t\t\n\t\n\tfloat t0 = 0.0, t1 = 0.0;\t\t\t\t\t// sphere intersection points\n\t\n\tfloat d = sphere_intersect (\t\t\t\t// initial intersection\n\t\tro, rd, sp, t0, t1); \n\t\n\tvec4 color = texture (iChannel0, rn);\n\t\n\tif (d > 0.0) {\n\t\tvec3 pt0 = ro + rd*t0;\n\t\tvec3 pt1 = ro + rd*t1;\n\t\tvec3 pn0 = normalize (pt0 - sp.xyz);\t\n\t\tvec3 pn1 = normalize (sp.xyz - pt1);\n\t\t\n\t\t\n\t\tvec3 r0 = reflect (rd, pn0);\t\t\t\n\t\tvec3 r1 = reflect (rd, pn1);\n\t\t\n\t\t\n\t\t\n\t\t//vec4 s0 = fbm3d4v (normalize (pn0), 8.0);\n\t\t//vec4 s1 = fbm3d4v (normalize (pn1), 8.0);\n\t\tvec4 s0 = compute (spherical (pn0.zxy).yz/2.0, iTime/8.0);\n\t\tvec4 s1 = compute (spherical (pn1.zxy).yz/2.0, iTime/8.0);\n\t\tvec4 c0 = texture (iChannel1, r0);\n\t\tvec4 c1 = texture (iChannel1, r1);\t\t\n\t\t\n\t\tcolor = mix (color,c1 + c1*s1, fresnel_step (rd, pn1, FR0));\n\t\tcolor = mix (color,c0 + c0*s0, fresnel_step (rd, pn0, FR0));\n\n\t\t\n\t}\n\t\n\t\n\tfragColor = color;\n}"
+  "title": "refractive sphere with fbm fresnel",
+  "url": "https://www.shadertoy.com/view/XdXXzB",
+  "channels": {"0":"env_cube","1":"env_cube","2":"noise","3":"noise"},
+  "source":
+`#define PI 			3.14159265359
+#define SPHERE 		vec4 (0.0, 0.0, 0.0, 2.0)
+#define FOV 		60.0
+
+#define RI_AIR		1.000293
+#define RI_SPH		1.55
+
+#define ETA 		(RI_AIR/RI_SPH)
+#define R			-0.02
+
+#define FR_BIAS		0.0
+#define FR_SCALE	1.0
+#define FR_POWER	0.7
+
+#define FR0			vec3 (0.0, 1.0, 0.7)
+
+#define PI 3.14159265359
+
+float noise (vec2 co) {
+  return length (texture (iChannel2, co));
+}
+
+mat2 rotate (float fi) {
+	float cfi = cos (fi);
+	float sfi = sin (fi);
+	return mat2 (-sfi, cfi, cfi, sfi);
+}
+
+vec3 hsv2rgb (vec3 c) {
+    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+float fbm ( vec2 uv) {
+	return (
+		+noise (uv*2.0)/2.0
+		+noise (uv*4.0)/4.0
+		+noise (uv*8.0)/8.0
+		+noise (uv*16.0)/16.0
+		+noise (uv*32.0)/32.0
+	);
+}
+
+vec4 compute (vec2 uv, float iTime) {	
+	uv *= rotate (PI * 0.5 * fbm (uv/256.0) * length (uv) + iTime);
+	uv = (iTime+uv)/196.0;
+	vec3 col = vec3 (fbm (uv)*PI*2.0, 1.0, 1.0);	
+	return vec4 (hsv2rgb (col),1.0) ;
+}
+			  
+mat3 rotate_x (float fi) {
+	float cfi = cos (fi);
+	float sfi = sin (fi);
+	return mat3 (
+		1.0, 0.0, 0.0,
+		0.0, cfi, -sfi,
+		0.0, sfi, cfi);
+}
+
+mat3 rotate_y (float fi) {
+	float cfi = cos (fi);
+	float sfi = sin (fi);
+	return mat3 (
+		cfi, 0.0, sfi,
+		0.0, 1.0, 0.0,
+		-sfi, 0.0, cfi);
+}
+
+mat3 rotate_z (float fi) {
+	float cfi = cos (fi);
+	float sfi = sin (fi);
+	return mat3 (
+		cfi, -sfi, 0.0,
+		sfi, cfi, 0.0,
+		0.0, 0.0, 1.0);
+}
+
+vec4 noise4v (vec2 p) {
+	return texture (iChannel2, p);
+}
+
+vec4 fbm4v (vec2 p) {
+	vec4 f = vec4 (0.0);
+	f += 0.5000 * noise4v (p); p *= 2.01;
+	f += 0.2500 * noise4v (p); p *= 2.02;
+	f += 0.1250 * noise4v (p); p *= 2.03;
+	f += 0.0625 * noise4v (p); p *= 2.04;
+	f /= 0.9375;
+	return f;
+}
+
+vec4 fbm3d4v (vec3 p, float s) {	
+	return 
+		compute (p.xy, iTime/s) * abs (p.z) +
+		compute (p.xz, iTime/s) * abs (p.y) +
+		compute (p.yz, iTime/s) * abs (p.x);
+}
+
+float sphere_intersect (in vec3 o, in vec3 d, in vec4 c, out float t0, out float t1) {
+	vec3 oc = o - c.xyz;
+	float A = dot (d, d);
+	float B = 2.0 * dot (oc, d);
+	float C = dot (oc, oc) - c.w;
+	float D = B*B - 4.0*A*C;
+	float q = (-B - sqrt (D) * sign (B))/2.0;
+	float _t0 = q/A;
+	float _t1 = C/q;
+	t0 = min (_t0, _t1);
+	t1 = max (_t0, _t1);
+	return step (0.0, D);
+}
+
+float fresnel_step (vec3 I, vec3 N, vec3 f) {
+	return clamp (f.x + f.y * pow (1.0 + dot (I, N), f.z), 0.0, 1.0);
+}
+
+vec2 to_spherical_normalized (vec3 pt) {
+	float r = length (pt);
+	return vec2 (acos (pt.z / r)/PI, atan (pt.y, pt.x)/PI + 0.5); 
+}
+
+vec3 spherical (vec3 cart) {
+	float r = length (cart);
+	float i = (acos (cart.z/r)/(PI/2.0) - 0.5)*2.0;
+	float a = atan (cart.y, cart.x)/PI;
+	return vec3 (r, a, i);
+}
+
+void mainImage( out vec4 fragColor, in vec2 fragCoord ) {
+	vec2 uv = (2.0*fragCoord.xy - iResolution.xy)/min (iResolution.x, iResolution.y) * tan (radians (FOV)/2.0);
+	vec2 mo = PI * iMouse.xy / iResolution.xy;
+	
+	vec3 up = vec3 (0.0, 1.0, 0.0); 			// up 
+	vec3 fw = vec3 (0.0, 0.0, 1.0) * 			// forward
+		rotate_y (mo.x * PI); 				
+	vec3 lf = cross (up, fw); 					// left
+	
+	vec3 ro = -fw * 5.0; 						// ray origin
+	vec3 rd = normalize (uv.x * lf + uv.y * up + fw) ; 		// ray direction
+	vec3 rn = rd;
+	vec3 dr = fbm4v (uv/64.0 + sin (iTime/128.0)).xyz - 0.5;
+	//rd = normalize (rd + dr/32.0);
+	
+	vec4 sp = SPHERE + 					
+		vec4 (0.0, 1.0, 0.0, 0.0)*sin (iTime); 							
+	
+	float t0 = 0.0, t1 = 0.0;					// sphere intersection points
+	
+	float d = sphere_intersect (				// initial intersection
+		ro, rd, sp, t0, t1); 
+	
+	vec4 color = texture (iChannel0, rn);
+	
+	if (d > 0.0) {
+		vec3 pt0 = ro + rd*t0;
+		vec3 pt1 = ro + rd*t1;
+		vec3 pn0 = normalize (pt0 - sp.xyz);	
+		vec3 pn1 = normalize (sp.xyz - pt1);
+		
+		
+		vec3 r0 = reflect (rd, pn0);			
+		vec3 r1 = reflect (rd, pn1);
+	
+		//vec4 s0 = fbm3d4v (normalize (pn0), 8.0);
+		//vec4 s1 = fbm3d4v (normalize (pn1), 8.0);
+		vec4 s0 = compute (spherical (pn0.zxy).yz/2.0, iTime/8.0);
+		vec4 s1 = compute (spherical (pn1.zxy).yz/2.0, iTime/8.0);
+		vec4 c0 = texture (iChannel1, r0);
+		vec4 c1 = texture (iChannel1, r1);		
+		
+		color = mix (color,c1 + c1*s1, fresnel_step (rd, pn1, FR0));
+		color = mix (color,c0 + c0*s0, fresnel_step (rd, pn0, FR0));
+
+	}
+
+	fragColor = color;
+}`,
 };
