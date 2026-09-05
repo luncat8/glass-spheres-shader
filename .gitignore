@@ -1,5 +1,9 @@
 tools_GPU/
 
+# dev-only tooling deps (runtime stays zero-dependency, see AGENTS.md)
+package.json
+package-lock.json
+
 .gpuq/
 
 # --- from GitHub Node template ---

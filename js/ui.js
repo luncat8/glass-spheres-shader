@@ -2,7 +2,7 @@
 (function () {
 	if (typeof module === 'object' && module.exports) { module.exports = {}; return; }
 
-	let canvas, statusEl, metaEl, errEl, fpsEl, bar, buttonsHost;
+	let canvas, statusEl, metaEl, errEl, fpsEl, bar, buttonsHost, paramsHost;
 	let runner;
 	let firstShader = null;
 	let pendingErr = '';
@@ -56,6 +56,39 @@
 		for (let i = 0; i < list.length; i++) buttonsHost.appendChild(buildButton(list[i]));
 	}
 
+	// slider strip generated from the current shader's `params` metadata.
+	// Each slider writes straight into param.value; runner.js uploads it per frame.
+	function buildParams(meta) {
+		paramsHost.textContent = '';
+		const ps = meta.params || [];
+		paramsHost.style.display = ps.length ? 'flex' : 'none';
+		for (let i = 0; i < ps.length; i++) {
+			const p = ps[i];
+			if (p.value === undefined) p.value = p.def;
+			const wrap = document.createElement('label');
+			wrap.className = 'param';
+			wrap.title = p.hint || p.name;
+			const name = document.createElement('span');
+			name.textContent = p.label || p.name;
+			const slider = document.createElement('input');
+			slider.type = 'range';
+			slider.min = p.min; slider.max = p.max; slider.step = p.step;
+			slider.value = p.value;
+			const read = document.createElement('b');
+			read.textContent = fmt(p.value, p.step);
+			slider.addEventListener('input', () => {
+				p.value = parseFloat(slider.value);
+				read.textContent = fmt(p.value, p.step);
+			});
+			wrap.appendChild(name); wrap.appendChild(slider); wrap.appendChild(read);
+			paramsHost.appendChild(wrap);
+		}
+	}
+
+	function fmt(v, step) {
+		return (step >= 1) ? String(v | 0) : v.toFixed(step >= 0.1 ? 1 : (step >= 0.01 ? 2 : 3));
+	}
+
 	function pick(id) {
 		try {
 			const meta = runner.select(id);
@@ -70,6 +103,7 @@
 				a.title = meta.url;
 				metaEl.appendChild(a);
 			}
+			buildParams(meta);
 			setActive(id);
 			setErr('');
 			statusEl.textContent = 'rendering';
@@ -93,6 +127,7 @@
 		fpsEl = document.getElementById('fps');
 		bar = document.getElementById('bar');
 		buttonsHost = document.getElementById('shader-buttons');
+		paramsHost = document.getElementById('params');
 
 		const list = window.SHADERS || [];
 		if (!list.length) {

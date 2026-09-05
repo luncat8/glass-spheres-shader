@@ -14,10 +14,7 @@
 // pre-allocated 256x256 placeholder textures (procedural noise / cubemap / gradient).
 
 (function (root) {
-	if (typeof module === 'object' && module.exports) {
-		module.exports = {};
-		return;
-	}
+	const IS_NODE = typeof module === 'object' && !!module.exports;
 
 	const VS = `#version 300 es
 precision highp float;
@@ -90,11 +87,33 @@ void main() {
 		return lines.join('\n');
 	}
 
+	// Optional shader-declared uniforms. `meta.params` are scalars driven by the
+	// GUI sliders, `meta.arrays` are per-frame data uniforms (e.g. bubble centres)
+	// filled by a feed function. Shaders never redeclare them.
+	function buildUniformDecls(meta) {
+		const ps = (meta && meta.params) || [];
+		const as = (meta && meta.arrays) || [];
+		if (!ps.length && !as.length) return '';
+		const lines = [];
+		for (let i = 0; i < ps.length; i++) lines.push('uniform ' + (ps[i].type || 'float') + ' ' + ps[i].name + ';');
+		for (let i = 0; i < as.length; i++) lines.push('uniform ' + (as[i].type || 'vec4') + ' ' + as[i].name + '[' + as[i].count + '];');
+		lines.push('', '');
+		return lines.join('\n');
+	}
+
 	const FS_FOOTER = `
 void main() {
 	mainImage(fragColor, gl_FragCoord.xy);
 	fragColor.a = 1.0;
 }`;
+
+	// node (tests/tooling): export only the pure source-assembly helpers, so
+	// tools_GPU/check-glsl.mjs can rebuild the exact fragment source the browser
+	// would compile. Browser behaviour below is untouched.
+	if (IS_NODE) {
+		module.exports = { detectCubeChannels, resolveChannelKinds, buildFSHeader, buildUniformDecls, FS_FOOTER, VS };
+		return;
+	}
 
 	const Runner = {
 		canvas: null,
@@ -254,7 +273,7 @@ void main() {
 		return prog;
 	}
 
-	function getUniformLocs(gl, prog) {
+	function getUniformLocs(gl, prog, meta) {
 		const names = [
 			'iResolution', 'iTime', 'iTimeDelta', 'iFrame', 'iFrameRate',
 			'iMouse', 'iDate',
@@ -262,7 +281,55 @@ void main() {
 		];
 		const out = {};
 		for (let i = 0; i < names.length; i++) out[names[i]] = gl.getUniformLocation(prog, names[i]);
+		const ps = (meta && meta.params) || [];
+		for (let i = 0; i < ps.length; i++) out[ps[i].name] = gl.getUniformLocation(prog, ps[i].name);
+		const as = (meta && meta.arrays) || [];
+		for (let i = 0; i < as.length; i++) {
+			out[as[i].name] = gl.getUniformLocation(prog, as[i].name) || gl.getUniformLocation(prog, as[i].name + '[0]');
+		}
 		return out;
+	}
+
+	// components per GLSL type, for array uploads
+	const TYPE_COMPS = { float: 1, vec2: 2, vec3: 3, vec4: 4 };
+
+	// initialise slider-backed params to their declared defaults (the UI may not
+	// have built the sliders yet when the first frame runs)
+	function prepareParams(meta) {
+		const ps = (meta && meta.params) || [];
+		for (let i = 0; i < ps.length; i++) if (ps[i].value === undefined) ps[i].value = ps[i].def;
+	}
+
+	// allocate the CPU-side buffer of every array uniform once, at select() time
+	function prepareArrays(meta) {
+		const as = (meta && meta.arrays) || [];
+		for (let i = 0; i < as.length; i++) {
+			const comps = TYPE_COMPS[as[i].type || 'vec4'] || 4;
+			if (!as[i].buf || as[i].buf.length !== as[i].count * comps) as[i].buf = new Float32Array(as[i].count * comps);
+		}
+	}
+
+	// per-frame upload of shader-declared uniforms (no allocation)
+	function uploadShaderUniforms(gl, locs, meta, time) {
+		const ps = (meta && meta.params) || [];
+		for (let i = 0; i < ps.length; i++) {
+			const loc = locs[ps[i].name];
+			if (!loc) continue;
+			if (ps[i].type === 'int') gl.uniform1i(loc, ps[i].value | 0);
+			else gl.uniform1f(loc, ps[i].value);
+		}
+		const as = (meta && meta.arrays) || [];
+		for (let i = 0; i < as.length; i++) {
+			const loc = locs[as[i].name];
+			if (!loc) continue;
+			const feed = root.Feeds && root.Feeds[as[i].feed];
+			if (feed) feed(time, meta, as[i].buf);
+			const type = as[i].type || 'vec4';
+			if (type === 'vec4') gl.uniform4fv(loc, as[i].buf);
+			else if (type === 'vec3') gl.uniform3fv(loc, as[i].buf);
+			else if (type === 'vec2') gl.uniform2fv(loc, as[i].buf);
+			else gl.uniform1fv(loc, as[i].buf);
+		}
 	}
 
 	function resize(canvas) {
@@ -334,7 +401,7 @@ void main() {
 		const gl = Runner.gl;
 		const flags = resolveChannelKinds(meta.source, meta.channels);
 		for (let i = 0; i < 4; i++) Runner.channelIsCube[i] = flags[i];
-		const header = buildFSHeader(meta.source, flags);
+		const header = buildFSHeader(meta.source, flags) + buildUniformDecls(meta);
 		const src = header + meta.source + FS_FOOTER;
 		const vs = compile(gl, gl.VERTEX_SHADER, VS);
 		const fs = compile(gl, gl.FRAGMENT_SHADER, src);
@@ -343,7 +410,9 @@ void main() {
 		gl.deleteShader(fs);
 		if (Runner.program) gl.deleteProgram(Runner.program);
 		Runner.program = prog;
-		Runner.uniformLocs = getUniformLocs(gl, prog);
+		Runner.uniformLocs = getUniformLocs(gl, prog, meta);
+		prepareParams(meta);
+		prepareArrays(meta);
 		Runner.current = meta;
 		Runner.startTime = performance.now();
 		Runner.lastTime = Runner.startTime;
@@ -386,6 +455,7 @@ void main() {
 			const d = dateVec();
 			gl.uniform4f(u.iDate, d[0], d[1], d[2], d[3]);
 		}
+		uploadShaderUniforms(gl, u, Runner.current, elapsed);
 		bindChannel(gl, Runner.program, u, 0);
 		bindChannel(gl, Runner.program, u, 1);
 		bindChannel(gl, Runner.program, u, 2);

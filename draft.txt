@@ -7,22 +7,13 @@ https://www.shadertoy.com/view/ld3SDl
 https://www.shadertoy.com/view/XdVSRV
 
 
-there is no gpu in sandbox. you need properly use  
-/tools_GPU/
-if need debug
-
-
-
 search internet other sites that better support vertex shader and have examples multiple glass bubbles in 3d
-
-review plan
-
 
 hollow glass bubbles with specific thickness of wall (GUI slider)
 
 
-
-search internet, make short task to create plan v0.3
-check is this good task for agent that 1000x has more capabilities then you?
+if there is no gpu in sandbox. and if available  
+/tools_GPU/
+use it for debug
 
 

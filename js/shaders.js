@@ -1,16 +1,19 @@
 // shaders.js — registry of Shadertoy shaders available to the runner.
-// Exposes window.SHADERS = list of { id, title, author, channels, source }.
+// Each shaders/*.js script assigns window.SHADER_<id> = { id, title, ... }.
+// The order of buttons is determined by the order of <script> tags in index.html.
+// Exposes window.SHADERS = list of those entries.
 (function () {
 	if (typeof module === 'object' && module.exports) {
 		// node: stub (this module is browser-only)
 		module.exports = { SHADERS: [] };
 		return;
 	}
-	const ids = ['XdXXzB', 'llsSDf', 'ld3SDl', 'multi_fresnel', 'multi_thinfilm', 'thick_glass'];
 	const list = [];
-	for (let i = 0; i < ids.length; i++) {
-		const s = window['SHADER_' + ids[i]];
-		if (s) list.push(s);
+	for (const k in window) {
+		if (k.indexOf('SHADER_') === 0) {
+			const s = window[k];
+			if (s && s.id) list.push(s);
+		}
 	}
 	window.SHADERS = list;
 })();
