@@ -10,18 +10,24 @@
 	#bar button { background: #2a2a2a; color: #ddd; border: 1px solid #3a3a3a; padding: 4px 10px; cursor: pointer; font: inherit; }
 	#bar button.active { background: #396; color: #000; }
 	#bar button:hover { background: #3a3a3a; }
+	#bar #cam { color: #9c9; }
+	#bar #music-wrap { display: inline-flex; align-items: center; gap: 5px; color: #999; cursor: pointer; }
+	#bar #music-wrap.off { color: #555; cursor: default; }
+	#bar #music-wrap input { accent-color: #396; cursor: pointer; }
+	#bar #music-wrap.off input { cursor: default; }
 	#bar a.stlink { color: #8cf; text-decoration: none; margin-left: 4px; font-size: 11px; border: 1px solid #2a4a6a; padding: 0 4px; border-radius: 2px; }
 	#bar a.stlink:hover { background: #2a4a6a; color: #cef; }
 	#bar span.shader-item { display: inline-flex; align-items: center; gap: 4px; }
 	#meta a.stlink { color: #8cf; text-decoration: none; margin-left: 8px; font-size: 11px; border: 1px solid #2a4a6a; padding: 1px 5px; border-radius: 2px; }
 	#meta a.stlink:hover { background: #2a4a6a; color: #cef; }
 	#stage { position: relative; background: #000; overflow: hidden; }
-	#c { display: block; width: 100%; height: 100%; image-rendering: auto; }
+	#c { display: block; width: 100%; height: 100%; image-rendering: auto; touch-action: none; user-select: none; -webkit-user-select: none; }
 	#status { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.5); padding: 4px 8px; border-radius: 3px; }
 	#params { display: none; flex-wrap: wrap; gap: 4px 14px; align-items: center; padding: 6px 10px; background: #171717; border-top: 1px solid #2a2a2a; }
 	#params label.param { display: inline-flex; align-items: center; gap: 6px; color: #999; }
 	#params label.param b { color: #6c9; min-width: 34px; text-align: right; font-weight: normal; }
 	#params input[type=range] { width: 108px; accent-color: #396; }
+	#params select { background: #2a2a2a; color: #ddd; border: 1px solid #3a3a3a; font: inherit; padding: 2px 4px; }
 	#info { padding: 6px 10px; background: #1b1b1b; border-top: 1px solid #2a2a2a; display: flex; gap: 16px; }
 	#err { color: #f55; white-space: pre-wrap; max-height: 30vh; overflow: auto; }
 </style>
@@ -32,6 +38,8 @@
 		<strong style="color:#888">shader:</strong>
 		<span id="shader-buttons"></span>
 		<span style="flex:1"></span>
+		<button id="cam" title="camera auto-orbit: 'auto' orbits until you move the camera (drag, wheel, pinch), then turns off; 'on' always orbits; 'off' never orbits">cam: auto</button>
+		<label id="music-wrap" class="off" title="play the shader's procedural music"><input type="checkbox" id="music" disabled> music</label>
 		<span id="fps" style="color:#888">-- fps</span>
 	</div>
 	<div id="stage">
@@ -55,8 +63,10 @@
 	<script src="shaders/multi_thinfilm.js"></script>
 	<script src="shaders/thick_glass.js"></script>
 	<script src="shaders/thick_analytic.js"></script>
-<script src="js/scene.js"></script>
-<script src="js/shaders.js"></script>
+	<script src="js/scene.js"></script>
+	<script src="js/camera.js"></script>
+	<script src="js/audio.js"></script>
+	<script src="js/shaders.js"></script>
 <script src="js/runner.js"></script>
 <script src="js/ui.js"></script>
 </body>

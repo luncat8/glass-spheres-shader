@@ -15,7 +15,19 @@ window.SHADER_hollow_bubbles = {
 	"title": "hollow glass bubbles - membrane wall, 32 spheres, sliders",
 	"channels": { "0": "env_cube", "1": "env_cube", "2": "noise", "3": "noise" },
 	"arrays": [{ "name": "uBubbles", "type": "vec4", "count": 32, "feed": "bubbles" }],
+	"vars": [
+		{ "name": "uCamPos", "type": "vec3", "feed": "camPos" },
+		{ "name": "uCamRt", "type": "vec3", "feed": "camRt" },
+		{ "name": "uCamUp", "type": "vec3", "feed": "camUp" },
+		{ "name": "uCamFw", "type": "vec3", "feed": "camFw" },
+		{ "name": "uSel", "type": "vec4", "feed": "camSel" }
+	],
 	"params": [
+		{ "name": "uScene", "type": "int", "label": "scene", "def": 0, "hint": "interior behind the bubbles", "options": [
+			{ "value": 0, "label": "checker land" },
+			{ "value": 1, "label": "rainbow" },
+			{ "value": 2, "label": "color box" }
+		] },
 		{ "name": "uCount", "type": "int", "label": "bubbles", "min": 1, "max": 32, "step": 1, "def": 14, "hint": "active bubbles" },
 		{ "name": "uWall", "type": "float", "label": "wall", "min": 0.005, "max": 0.5, "step": 0.005, "def": 0.06, "hint": "glass wall thickness, as a fraction of the bubble radius" },
 		{ "name": "uIor", "type": "float", "label": "ior", "min": 1.0, "max": 2.0, "step": 0.01, "def": 1.45, "hint": "index of refraction of the glass" },
@@ -32,6 +44,7 @@ window.SHADER_hollow_bubbles = {
 ${GLSL.raySphere}
 ${GLSL.camera}
 ${GLSL.env}
+${GLSL.selGlow}
 
 #define MAXB   32
 #define EPS    0.0025
@@ -183,6 +196,7 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 		camera (fragCoord, ro, rd);
 		col = trace (ro, rd);
 	}
+	col += selGlow (ro, rd);
 	fragColor = vec4 (tonemap (col), 1.0);
 }
 `,

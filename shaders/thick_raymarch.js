@@ -8,11 +8,27 @@ window.SHADER_thick_raymarch = {
 	"id": "thick_raymarch",
 	"title": "solid glass bubbles - raymarched sdf, 2 bounces (4)",
 	"channels": { "0": "env_cube", "1": "env_cube", "2": "noise", "3": "noise" },
+	"fixed4": true,
+	"vars": [
+		{ "name": "uCamPos", "type": "vec3", "feed": "camPos" },
+		{ "name": "uCamRt", "type": "vec3", "feed": "camRt" },
+		{ "name": "uCamUp", "type": "vec3", "feed": "camUp" },
+		{ "name": "uCamFw", "type": "vec3", "feed": "camFw" },
+		{ "name": "uSel", "type": "vec4", "feed": "camSel" }
+	],
+	"params": [
+		{ "name": "uScene", "type": "int", "label": "scene", "def": 0, "hint": "interior behind the bubbles", "options": [
+			{ "value": 0, "label": "checker land" },
+			{ "value": 1, "label": "rainbow" },
+			{ "value": 2, "label": "color box" }
+		] }
+	],
 	"source":
 `${GLSL.common}
 ${GLSL.camera}
 ${GLSL.bubbles4}
 ${GLSL.env}
+${GLSL.selGlow}
 
 #define MAXSTEPS 64
 #define MAXDIS   40.0
@@ -127,6 +143,7 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 		col += c * filt;
 		filt *= refl;
 	}
+	col += selGlow (ro, rd);
 
 	fragColor = vec4 (tonemap (col), 1.0);
 }

@@ -37,17 +37,13 @@ vec3 tonemap (vec3 c) {
 }
 `;
 
-	// iMouse-orbited camera, identical rig to XdXXzB
+	// JS-driven orbit camera (js/camera.js). The runner uploads the eye and the
+	// right/up/forward basis every frame, so drag-orbit, zoom and bubble
+	// selection live in one place and work with mouse, pointer and wheel.
 	GLSL.camera = `void camera (vec2 fragCoord, out vec3 ro, out vec3 rd) {
 	vec2 uv = (2.0 * fragCoord.xy - iResolution.xy) / min (iResolution.x, iResolution.y) * tan (radians (FOV) / 2.0);
-	vec2 mo = iMouse.xy / iResolution.xy;
-	float ang = (iMouse.x + iMouse.y > 0.0) ? mo.x * 2.0 * PI : iTime * 0.15;
-	float ele = (iMouse.x + iMouse.y > 0.0) ? (mo.y - 0.5) * 1.6 : 0.15;
-	vec3 fw = normalize (vec3 (sin (ang) * cos (ele), sin (ele), cos (ang) * cos (ele)));
-	vec3 lf = normalize (cross (vec3 (0.0, 1.0, 0.0), fw));
-	vec3 up = cross (fw, lf);
-	ro = -fw * 7.5;
-	rd = normalize (uv.x * lf + uv.y * up + fw);
+	ro = uCamPos;
+	rd = normalize (uv.x * uCamRt + uv.y * uCamUp + uCamFw);
 }
 `;
 
@@ -67,10 +63,14 @@ vec3 absorbOf (int i) {
 }
 `;
 
-	// Analytic environment: sky gradient + sun + a checkered ground plane.
-	// Procedural instead of the runner's 32px placeholder cube, because glass is
-	// only convincing when there is structure behind it to bend. Direction-only,
-	// exactly like a cube map, so it can be sampled from anywhere.
+	// Analytic environments for the glass scenes, with three selectable
+	// "interiors" (uScene int, see the shader uiScene params):
+	//   0 = checker land (hollow_bubbles style), 1 = rainbow (llsSDf style),
+	//   2 = colour box (XdXXzB style).
+	// Direction-only, exactly like a cubemap, so it can be sampled from
+	// anywhere. Procedural instead of the runner's 32px placeholder cube,
+	// because glass is only convincing when there is structure behind it to
+	// bend. envSun() adds the sun on top.
 	GLSL.env = `#define SUN_DIR normalize (vec3 (0.35, 0.62, -0.70))
 
 // smooth analytic 3D wobble in [-1,1]. No texture, no hash, no noise grain -
@@ -82,10 +82,17 @@ float swirl (vec3 p) {
 	return (a * b + c) * 0.5;
 }
 
-vec3 env (vec3 d) {
+vec3 hsv2rgb (vec3 c) {
+	vec4 K = vec4 (1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+	vec3 p = abs (fract (c.xxx + K.xyz) * 6.0 - K.www);
+	return c.z * mix (K.xxx, clamp (p - K.xxx, 0.0, 1.0), c.y);
+}
+
+// theme 0: sky gradient + a checkered ground plane at y = -3, fading into
+// the horizon haze (the hollow_bubbles interior, unchanged).
+vec3 envChecker (vec3 d) {
 	d = normalize (d);
 	if (d.y < -0.02) {
-		// ground plane at y = -3, checkered, fading into the horizon haze
 		float t = -3.0 / d.y;
 		vec2 q = d.xz * t;
 		float chk = mod (floor (q.x * 0.35) + floor (q.y * 0.35), 2.0);
@@ -102,11 +109,63 @@ vec3 env (vec3 d) {
 	return sky;
 }
 
+// theme 1: llsSDf-style rainbow — the hue rides the azimuth, with soft
+// cellular blobs and bright bubble-like highlights on top.
+vec3 envRainbow (vec3 d) {
+	d = normalize (d);
+	float hue = fract (atan (d.z, d.x) / (2.0 * PI) + 0.5 * d.y + iTime * 0.02);
+	vec3 col = hsv2rgb (vec3 (hue, 0.60, 0.50 + 0.30 * saturate1 (d.y)));
+	float c1 = 0.5 + 0.5 * swirl (d * 3.0 + vec3 (0.0, iTime * 0.04, 1.7));
+	float c2 = 0.5 + 0.5 * swirl (d * 6.5 - vec3 (iTime * 0.03, 0.8, 0.0));
+	vec3 top = 0.5 + 0.5 * cos (2.0 * PI * (hue + vec3 (0.0, 0.33, 0.67)));
+	col = mix (col, top * 1.25, 0.30 * c1);
+	col += vec3 (1.0) * pow (c2, 6.0) * 0.12;
+	return col;
+}
+
+// theme 2: XdXXzB-style colour box — fbm-hued colour all around the camera.
+vec3 envColorBox (vec3 d) {
+	d = normalize (d);
+	vec3 p = d * 2.4 + vec3 (iTime * 0.05, iTime * 0.03, 0.0);
+	float n = swirl (p * 1.6)
+		+ 0.5 * swirl (p * 3.1 + vec3 (4.7, 2.9, 1.3))
+		+ 0.25 * swirl (p * 6.3 - vec3 (1.9, 5.1, 3.7));
+	n = n * 0.57 + 0.5;
+	vec3 col = hsv2rgb (vec3 (fract (n * 1.4), 0.85, 0.92));
+	col *= 0.80 + 0.20 * saturate1 (d.y * 0.5 + 0.5);
+	return col;
+}
+
+// the selected interior, driven by the uScene param
+vec3 env (vec3 d) {
+	if (uScene >= 2) return envColorBox (d);
+	if (uScene == 1) return envRainbow (d);
+	return envChecker (d);
+}
+
 // env + the sun itself: a tight disc plus a broad glow, so reflections sparkle
 vec3 envSun (vec3 d) {
 	d = normalize (d);
 	float s = saturate1 (dot (d, SUN_DIR));
 	return env (d) + vec3 (1.25, 1.10, 0.90) * (pow (s, 3000.0) * 14.0 + pow (s, 20.0) * 0.30);
+}
+`;
+
+	// selection halo: analytic rim glow on the currently selected bubble.
+	// uSel = vec4 (centre, radius); w <= 0.5 disables it (nothing selected).
+	GLSL.selGlow = `vec3 selGlow (vec3 ro, vec3 rd) {
+	if (uSel.w < 0.5) return vec3 (0.0);
+	vec3 oc = ro - uSel.xyz;
+	float A = dot (rd, rd);
+	float B = 2.0 * dot (oc, rd);
+	float C = dot (oc, oc) - uSel.w * uSel.w;
+	float D = B * B - 4.0 * A * C;
+	if (D < 0.0) return vec3 (0.0);
+	float t = (-B - sqrt (D)) / (2.0 * A);
+	if (t <= 0.0) return vec3 (0.0);
+	vec3 n = normalize (ro + rd * t - uSel.xyz);
+	float rim = pow (1.0 - abs (dot (n, rd)), 3.0);
+	return vec3 (0.28, 1.0, 0.62) * rim * 0.45;
 }
 `;
 

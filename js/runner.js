@@ -89,14 +89,17 @@ void main() {
 
 	// Optional shader-declared uniforms. `meta.params` are scalars driven by the
 	// GUI sliders, `meta.arrays` are per-frame data uniforms (e.g. bubble centres)
+	// and `meta.vars` are per-frame scalar-family uniforms (e.g. the camera basis)
 	// filled by a feed function. Shaders never redeclare them.
 	function buildUniformDecls(meta) {
 		const ps = (meta && meta.params) || [];
 		const as = (meta && meta.arrays) || [];
-		if (!ps.length && !as.length) return '';
+		const vs = (meta && meta.vars) || [];
+		if (!ps.length && !as.length && !vs.length) return '';
 		const lines = [];
 		for (let i = 0; i < ps.length; i++) lines.push('uniform ' + (ps[i].type || 'float') + ' ' + ps[i].name + ';');
 		for (let i = 0; i < as.length; i++) lines.push('uniform ' + (as[i].type || 'vec4') + ' ' + as[i].name + '[' + as[i].count + '];');
+		for (let i = 0; i < vs.length; i++) lines.push('uniform ' + (vs[i].type || 'vec4') + ' ' + vs[i].name + ';');
 		lines.push('', '');
 		return lines.join('\n');
 	}
@@ -132,6 +135,7 @@ void main() {
 		fps: 0,
 		fpsSamples: [],
 		fpsLast: 0,
+		elapsed: 0, // seconds since the current shader was selected
 		mouse: [0, 0, 0, 0], // x, y, clickX, clickY in pixels
 		onError: null,
 	};
@@ -287,6 +291,8 @@ void main() {
 		for (let i = 0; i < as.length; i++) {
 			out[as[i].name] = gl.getUniformLocation(prog, as[i].name) || gl.getUniformLocation(prog, as[i].name + '[0]');
 		}
+		const vs = (meta && meta.vars) || [];
+		for (let i = 0; i < vs.length; i++) out[vs[i].name] = gl.getUniformLocation(prog, vs[i].name);
 		return out;
 	}
 
@@ -309,6 +315,23 @@ void main() {
 		}
 	}
 
+	// same for scalar-family var uniforms (vec2/vec3/vec4/float)
+	function prepareVars(meta) {
+		const vs = (meta && meta.vars) || [];
+		for (let i = 0; i < vs.length; i++) {
+			const comps = TYPE_COMPS[vs[i].type || 'vec4'] || 4;
+			if (!vs[i].buf || vs[i].buf.length !== comps) vs[i].buf = new Float32Array(comps);
+		}
+	}
+
+	// one uniform upload for a fed buffer (arrays and vars share it)
+	function uploadBuf(gl, loc, type, buf) {
+		if (type === 'vec4') gl.uniform4fv(loc, buf);
+		else if (type === 'vec3') gl.uniform3fv(loc, buf);
+		else if (type === 'vec2') gl.uniform2fv(loc, buf);
+		else gl.uniform1fv(loc, buf);
+	}
+
 	// per-frame upload of shader-declared uniforms (no allocation)
 	function uploadShaderUniforms(gl, locs, meta, time) {
 		const ps = (meta && meta.params) || [];
@@ -324,11 +347,15 @@ void main() {
 			if (!loc) continue;
 			const feed = root.Feeds && root.Feeds[as[i].feed];
 			if (feed) feed(time, meta, as[i].buf);
-			const type = as[i].type || 'vec4';
-			if (type === 'vec4') gl.uniform4fv(loc, as[i].buf);
-			else if (type === 'vec3') gl.uniform3fv(loc, as[i].buf);
-			else if (type === 'vec2') gl.uniform2fv(loc, as[i].buf);
-			else gl.uniform1fv(loc, as[i].buf);
+			uploadBuf(gl, loc, as[i].type || 'vec4', as[i].buf);
+		}
+		const vs = (meta && meta.vars) || [];
+		for (let i = 0; i < vs.length; i++) {
+			const loc = locs[vs[i].name];
+			if (!loc) continue;
+			const feed = root.Feeds && root.Feeds[vs[i].feed];
+			if (feed) feed(time, meta, vs[i].buf);
+			uploadBuf(gl, loc, vs[i].type || 'vec4', vs[i].buf);
 		}
 	}
 
@@ -413,6 +440,7 @@ void main() {
 		Runner.uniformLocs = getUniformLocs(gl, prog, meta);
 		prepareParams(meta);
 		prepareArrays(meta);
+		prepareVars(meta);
 		Runner.current = meta;
 		Runner.startTime = performance.now();
 		Runner.lastTime = Runner.startTime;
@@ -439,6 +467,10 @@ void main() {
 		const dt = (t - Runner.lastTime) / 1000;
 		Runner.lastTime = t;
 		const elapsed = (t - Runner.startTime) / 1000;
+		Runner.elapsed = elapsed;
+
+		// orbit camera: advance auto-motion, refresh basis and feeds
+		if (root.Cam && root.Cam.tick) root.Cam.tick(dt, elapsed);
 
 		const wh = resize(Runner.canvas);
 		gl.viewport(0, 0, wh[0], wh[1]);
@@ -494,5 +526,11 @@ void main() {
 		};
 	}
 
-	root.Runner = { init, select, run, stop, stats };
+	// `current` is a live getter so external code (ui, browser checks) sees the
+	// meta of the selected shader without a manual refresh; `mouse` shares the
+	// internal iMouse array (pointer/touch handling in camera.js writes to it)
+	const api = { init, select, run, stop, stats, mouse: Runner.mouse };
+	Object.defineProperty(api, 'current', { get: () => Runner.current });
+	Object.defineProperty(api, 'elapsed', { get: () => Runner.elapsed });
+	root.Runner = api;
 })(typeof window !== 'undefined' ? window : globalThis);

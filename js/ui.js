@@ -3,6 +3,7 @@
 	if (typeof module === 'object' && module.exports) { module.exports = {}; return; }
 
 	let canvas, statusEl, metaEl, errEl, fpsEl, bar, buttonsHost, paramsHost;
+	let musicChk, musicWrap, camBtn;
 	let runner;
 	let firstShader = null;
 	let pendingErr = '';
@@ -56,8 +57,9 @@
 		for (let i = 0; i < list.length; i++) buttonsHost.appendChild(buildButton(list[i]));
 	}
 
-	// slider strip generated from the current shader's `params` metadata.
-	// Each slider writes straight into param.value; runner.js uploads it per frame.
+	// parameter strip generated from the current shader's `params` metadata.
+	// Sliders write straight into param.value; options params (p.options) render
+	// as a <select>. runner.js uploads the values per frame.
 	function buildParams(meta) {
 		paramsHost.textContent = '';
 		const ps = meta.params || [];
@@ -70,6 +72,20 @@
 			wrap.title = p.hint || p.name;
 			const name = document.createElement('span');
 			name.textContent = p.label || p.name;
+			if (p.options && p.options.length) {
+				const sel = document.createElement('select');
+				for (let o = 0; o < p.options.length; o++) {
+					const opt = document.createElement('option');
+					opt.value = p.options[o].value;
+					opt.textContent = p.options[o].label;
+					if (p.options[o].value === p.value) opt.selected = true;
+					sel.appendChild(opt);
+				}
+				sel.addEventListener('change', () => { p.value = parseFloat(sel.value); });
+				wrap.appendChild(name); wrap.appendChild(sel);
+				paramsHost.appendChild(wrap);
+				continue;
+			}
 			const slider = document.createElement('input');
 			slider.type = 'range';
 			slider.min = p.min; slider.max = p.max; slider.step = p.step;
@@ -85,6 +101,27 @@
 		}
 	}
 
+	// music is off by default; only shaders with `music: true` have a piece.
+	// `restart` = the shader was just picked (piece starts at 0); otherwise the
+	// piece seeks to the current shader time so toggling mid-run stays in sync.
+	function syncMusic(meta, restart) {
+		const has = !!(meta && meta.music);
+		musicChk.disabled = !has;
+		musicWrap.classList.toggle('off', !has);
+		musicWrap.title = has ? 'play the shader\'s procedural music (off by default)'
+			: 'this shader has no music (llsSDf does)';
+		const want = has && musicChk.checked;
+		if (!window.AudioM) return;
+		if (!want) { window.AudioM.setEnabled(false); return; }
+		if (restart) window.AudioM.reset();
+		else if (runner && runner.current) window.AudioM.seek(runner.elapsed || 0);
+		window.AudioM.setEnabled(true);
+	}
+
+	function updateCam() {
+		camBtn.textContent = window.Cam ? window.Cam.label() : 'cam';
+	}
+
 	function fmt(v, step) {
 		return (step >= 1) ? String(v | 0) : v.toFixed(step >= 0.1 ? 1 : (step >= 0.01 ? 2 : 3));
 	}
@@ -92,6 +129,7 @@
 	function pick(id) {
 		try {
 			const meta = runner.select(id);
+			if (window.Cam) window.Cam.attach(meta);
 			metaEl.textContent = meta.title || meta.id;
 			if (meta.url) {
 				const a = document.createElement('a');
@@ -104,6 +142,8 @@
 				metaEl.appendChild(a);
 			}
 			buildParams(meta);
+			syncMusic(meta, true);
+			updateCam();
 			setActive(id);
 			setErr('');
 			statusEl.textContent = 'rendering';
@@ -128,6 +168,9 @@
 		bar = document.getElementById('bar');
 		buttonsHost = document.getElementById('shader-buttons');
 		paramsHost = document.getElementById('params');
+		musicChk = document.getElementById('music');
+		musicWrap = document.getElementById('music-wrap');
+		camBtn = document.getElementById('cam');
 
 		const list = window.SHADERS || [];
 		if (!list.length) {
@@ -143,12 +186,20 @@
 			return;
 		}
 		runner.onError = (m) => setErr(m);
+		if (window.Cam) {
+			window.Cam.init(canvas, runner);
+			window.Cam.onModeChange = updateCam;
+		}
 		// wire buttons
 		const btns = buttonsHost.querySelectorAll('button[data-id]');
 		for (let i = 0; i < btns.length; i++) {
 			const id = btns[i].dataset.id;
 			btns[i].addEventListener('click', () => pick(id));
 		}
+		musicChk.addEventListener('change', () => syncMusic(runner.current));
+		camBtn.addEventListener('click', () => {
+			if (window.Cam) { window.Cam.cycleMode(); updateCam(); }
+		});
 		// boot first shader
 		pick(firstShader);
 		runner.run();
@@ -161,6 +212,10 @@
 			list: () => (window.SHADERS || []).map((s) => s.id),
 			current: () => runner.current && runner.current.id,
 			getCanvas: () => canvas,
+			cam: () => (window.Cam ? window.Cam.state() : null),
+			cycleCam: () => { if (window.Cam) { window.Cam.cycleMode(); updateCam(); } },
+			music: () => (window.AudioM ? window.AudioM.isActive() : false),
+			setMusic: (v) => { musicChk.checked = !!v; syncMusic(runner.current); },
 		};
 	}
 

@@ -8,12 +8,28 @@ window.SHADER_thick_analytic = {
 	"id": "thick_analytic",
 	"title": "solid glass bubbles - analytic, depth sorted (4)",
 	"channels": { "0": "env_cube", "1": "env_cube", "2": "noise", "3": "noise" },
+	"fixed4": true,
+	"vars": [
+		{ "name": "uCamPos", "type": "vec3", "feed": "camPos" },
+		{ "name": "uCamRt", "type": "vec3", "feed": "camRt" },
+		{ "name": "uCamUp", "type": "vec3", "feed": "camUp" },
+		{ "name": "uCamFw", "type": "vec3", "feed": "camFw" },
+		{ "name": "uSel", "type": "vec4", "feed": "camSel" }
+	],
+	"params": [
+		{ "name": "uScene", "type": "int", "label": "scene", "def": 0, "hint": "interior behind the bubbles", "options": [
+			{ "value": 0, "label": "checker land" },
+			{ "value": 1, "label": "rainbow" },
+			{ "value": 2, "label": "color box" }
+		] }
+	],
 	"source":
 `${GLSL.common}
 ${GLSL.raySphere}
 ${GLSL.camera}
 ${GLSL.bubbles4}
 ${GLSL.env}
+${GLSL.selGlow}
 
 #define IOR 1.55
 #define F0  0.04
@@ -82,6 +98,7 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 	col = mix (col, l1.c, l1.a);
 	col = mix (col, l2.c, l2.a);
 	col = mix (col, l3.c, l3.a);
+	col += selGlow (ro, rd);
 
 	fragColor = vec4 (tonemap (col), 1.0);
 }

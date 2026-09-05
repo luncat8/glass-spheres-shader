@@ -7,6 +7,7 @@ window.SHADER_llsSDf = {
   "title": "cellular bubble metaballs",
   "url": "https://www.shadertoy.com/view/llsSDf",
   "channels": {},
+  "music": true,
   "source":
 `vec2 uv;
 
