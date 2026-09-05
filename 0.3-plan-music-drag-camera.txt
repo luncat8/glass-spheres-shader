@@ -1,0 +1,17 @@
+1
+add music checkbox. off by default
+llsSDf_mus.txt
+
+2
+make camera orbit (around scene center or selected bubble) change as press and drag (pointer, touch, LMB), zoom (wheel, gesture)
+select deselect with click on bubble or outside it if it is easy easy (do not implement difficult techniques, may simplify to distance from bubble center if no better simple way available)
+
+auto camera movement tristate toggle: enable, disabled, default is: enabled until user move camera manually
+
+3
+scene interior selector
+rainbow similar to llsSDf
+color box similar to XdXXzB
+checker land similar to hollow_bubbles
+
+feel free to improve and fix found bugs

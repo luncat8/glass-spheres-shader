@@ -1,2 +1,0 @@
-add music checkbox. off by default
-llsSDf_mus.txt
