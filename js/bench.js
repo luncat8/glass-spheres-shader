@@ -30,11 +30,14 @@
 		{ label: '640 × 360', w: 640, h: 360 },
 		{ label: '1024 × 576', w: 1024, h: 576 },
 		{ label: '2560 × 1440', w: 2560, h: 1440 },
+		{ label: '3840 × 2160', w: 3840, h: 2160 },
 	];
 	// pixel-proportional resolution thresholds (calibrated at CALIB_RES):
 	//   cheap shaders scale linearly with pixels, so the median at 640x360
 	//   predicts whether the next resolution step will stay inside budget.
 	//   each step multiplies pixels by ~2.5x (RES[1]->RES[2]) or ~6.9x (RES[2]->RES[3])
+	//   top tier (RES[4], 4K) is ~9.4x pixels above the calib resolution;
+	//   "one step down" from top = 2560x1440.
 	const STEP_DOWN_MS = 18;        // predicted cost >25ms => drop one res step
 	const SKIP_ONE_STEP_MS = 8;     // calib <8ms at 640x360 => can jump one step up
 	const SKIP_TWO_STEPS_MS = 2.5;  // calib <2.5ms at 640x360 => can jump to top res

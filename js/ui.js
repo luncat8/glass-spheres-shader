@@ -3,7 +3,7 @@
 	if (typeof module === 'object' && module.exports) { module.exports = {}; return; }
 
 	let canvas, statusEl, metaEl, errEl, fpsEl, bar, buttonsHost, paramsHost;
-	let musicChk, musicWrap, camBtn, copyBtn;
+	let musicChk, musicWrap, camBtn, movBtn, aaBtn, copyBtn;
 	let runner;
 	let firstShader = null;
 	let pendingErr = '';
@@ -122,6 +122,13 @@
 	function updateCam() {
 		camBtn.textContent = window.Cam ? window.Cam.label() : 'cam';
 	}
+	function updateMov() {
+		movBtn.textContent = runner.getMov() ? 'mov: on' : 'mov: off';
+	}
+
+	function updateAA() {
+		aaBtn.textContent = runner.getAA() ? 'aa: on' : 'aa: off';
+	}
 
 	// -------------------------------------------------- copy prompt button
 
@@ -225,6 +232,8 @@
 		musicChk = document.getElementById('music');
 		musicWrap = document.getElementById('music-wrap');
 		camBtn = document.getElementById('cam');
+		movBtn = document.getElementById('mov');
+		aaBtn = document.getElementById('aa');
 		copyBtn = document.getElementById('copy-prompt');
 
 		const list = window.SHADERS || [];
@@ -255,6 +264,9 @@
 		camBtn.addEventListener('click', () => {
 			if (window.Cam) { window.Cam.cycleMode(); updateCam(); }
 		});
+		movBtn.addEventListener('click', () => { runner.setMov(!runner.getMov()); updateMov(); });
+		aaBtn.addEventListener('click', () => { runner.setAA(!runner.getAA()); updateAA(); });
+		runner.onAAChangeSetter(updateAA);
 		if (copyBtn) {
 			copyBtn.title = window.Prompts ? window.Prompts.summary(runner.current) : 'copy the LLM prompt for the current shader';
 			copyBtn.addEventListener('click', copyPrompt);
@@ -263,6 +275,8 @@
 		pick(firstShader);
 		runner.run();
 		tick();
+		updateAA();
+		updateMov();
 
 		// expose for the browser check
 		window.__app = {
@@ -275,6 +289,10 @@
 			cycleCam: () => { if (window.Cam) { window.Cam.cycleMode(); updateCam(); } },
 			music: () => (window.AudioM ? window.AudioM.isActive() : false),
 			setMusic: (v) => { musicChk.checked = !!v; syncMusic(runner.current); },
+			aa: () => runner.getAA(),
+			setAA: (v) => { runner.setAA(!!v); updateAA(); },
+			mov: () => runner.getMov(),
+			setMov: (v) => { runner.setMov(!!v); updateMov(); },
 			copyPrompt,
 			promptText,
 		};

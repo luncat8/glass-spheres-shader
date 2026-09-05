@@ -142,7 +142,7 @@
 		const s = Cam.selSrc;
 		const meta = runner && runner.current;
 		if (!s || !meta) return;
-		const time = runner.elapsed || 0;
+		const time = (runner && runner.sceneTime !== undefined) ? runner.sceneTime : (runner.elapsed || 0);
 		let src = null, n = 0;
 		if (s.kind === 'bubbles') {
 			const as = meta.arrays || [];
@@ -178,7 +178,7 @@
 	function pick(cssX, cssY) {
 		const meta = runner && runner.current;
 		if (!canvas || !meta) return;
-		const p = pickable(meta, runner.elapsed || 0);
+		const p = pickable(meta, (runner.sceneTime !== undefined) ? runner.sceneTime : (runner.elapsed || 0));
 		if (!p) { clearSel(); return; }
 
 		basis();

@@ -11,6 +11,7 @@
 	#bar button.active { background: #396; color: #000; }
 	#bar button:hover { background: #3a3a3a; }
 	#bar #cam { color: #9c9; }
+	#bar #aa { color: #9c9; }
 	#bar #music-wrap { display: inline-flex; align-items: center; gap: 5px; color: #999; cursor: pointer; }
 	#bar #music-wrap.off { color: #555; cursor: default; }
 	#bar #music-wrap input { accent-color: #396; cursor: pointer; }
@@ -65,8 +66,10 @@
 		<span id="shader-buttons"></span>
 		<span style="flex:1"></span>
 		<button id="cam" title="camera auto-orbit: 'auto' orbits until you move the camera (drag, wheel, pinch), then turns off; 'on' always orbits; 'off' never orbits">cam: auto</button>
+		<button id="mov" title="sphere animation: 'on' advances the feed time that drives bubble motion; 'off' freezes the spheres in place (camera and visual effects keep moving)">mov: on</button>
+		<button id="aa" title="SMAA 1x post-process antialiasing (auto-off above 2K)">aa: on</button></oldString>
 		<label id="music-wrap" class="off" title="play the shader's procedural music"><input type="checkbox" id="music" disabled> music</label>
-		<button id="bench" title="benchmark the multi-bubble shaders on the same 16-128 bubble scene; GPU ms is measured with EXT_disjoint_timer_query_webgl2 when available, otherwise via gl.finish(), so display refresh limits don't skew it">benchmark</button>
+		<button id="bench" title="benchmark the multi-bubble shaders on the same 16-128 bubble scene at up to 4K; GPU ms is measured with EXT_disjoint_timer_query_webgl2 when available, otherwise via gl.finish(), so display refresh limits don't skew it">benchmark</button>
 		<button id="copy-prompt" title="copy a prompt asking an LLM to implement a shader like the currently selected one (tech description + GitHub link)">copy prompt</button>
 		<span id="fps" style="color:#888">-- fps</span>
 	</div>
@@ -101,6 +104,7 @@
 	<script src="js/audio.js"></script>
 	<script src="js/shaders.js"></script>
 <script src="js/runner.js"></script>
+<script src="js/smaa.js"></script>
 <script src="js/prompts.js"></script>
 <script src="js/bench.js"></script>
 <script src="js/ui.js"></script>

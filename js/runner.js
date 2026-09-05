@@ -134,8 +134,19 @@ void main() {
 		frame: 0,
 		fpsSamples: [],
 		elapsed: 0, // seconds since the current shader was selected
+		mov: true,        // sphere-movement toggle (false = freeze feed time)
+		sceneTime: 0,     // feed time; accumulates only while mov is true
 		mouse: [0, 0, 0, 0], // x, y, clickX, clickY in pixels
 		onError: null,
+		aa: true,           // AA toggle (settable via setAA)
+		onAAChange: null,   // ui hook to refresh the AA button label
+		smaa: null,         // result of SMAA.init(gl) if SMAA loaded
+		smaaMaxW: 2560,
+		smaaMaxH: 1440,
+		sceneFBO: null,
+		sceneTex: null,
+		sceneW: 0,
+		sceneH: 0,
 	};
 
 	function makeNoiseTexture(gl) {
@@ -385,6 +396,19 @@ void main() {
 		gl.bindVertexArray(null);
 		Runner.vao = vao;
 
+		// SMAA is optional: if smaa.js is not loaded, AA is force-disabled.
+		if (root.SMAA) {
+			try {
+				Runner.smaa = root.SMAA.init(gl);
+			} catch (e) {
+				Runner.smaa = null;
+				Runner.aa = false;
+				if (Runner.onError) Runner.onError('SMAA init failed: ' + (e.message || e));
+			}
+		} else {
+			Runner.aa = false;
+		}
+
 		// preallocated channel textures
 		const channels2D = [
 			makeNoiseTexture(gl),                         // ch0
@@ -444,6 +468,7 @@ void main() {
 		Runner.lastTime = Runner.startTime;
 		Runner.frame = 0;
 		Runner.fpsSamples.length = 0;
+		Runner.sceneTime = 0;
 		return meta;
 	}
 
@@ -458,6 +483,44 @@ void main() {
 		gl.uniform1i(locs['iChannel' + idx], idx);
 	}
 
+	// allocate or re-allocate the AA scene FBO at the given size.
+	// WebGL2 defaults FBO color attachments to NEAREST — SMAA needs LINEAR.
+	function ensureSceneFBO(gl, w, h) {
+		if (Runner.sceneW === w && Runner.sceneH === h && Runner.sceneFBO) return;
+		if (Runner.sceneFBO) {
+			gl.deleteFramebuffer(Runner.sceneFBO);
+			gl.deleteTexture(Runner.sceneTex);
+			Runner.sceneFBO = null;
+			Runner.sceneTex = null;
+		}
+		const tex = gl.createTexture();
+		gl.bindTexture(gl.TEXTURE_2D, tex);
+		gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+		const fb = gl.createFramebuffer();
+		gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+		gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+		const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+		if (status !== gl.FRAMEBUFFER_COMPLETE) {
+			gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+			throw new Error('scene FBO incomplete: 0x' + status.toString(16));
+		}
+		Runner.sceneFBO = fb;
+		Runner.sceneTex = tex;
+		Runner.sceneW = w;
+		Runner.sceneH = h;
+	}
+
+	// the user shader draw. Called twice when AA is on (scene FBO then SMAA
+	// blits to default FB) or once when AA is off (default FB).
+	function drawScene(gl) {
+		gl.bindVertexArray(Runner.vao);
+		gl.drawArrays(gl.TRIANGLES, 0, 3);
+	}
+
 	function frame() {
 		if (!Runner.running) return;
 		const gl = Runner.gl;
@@ -466,6 +529,7 @@ void main() {
 		Runner.lastTime = t;
 		const elapsed = (t - Runner.startTime) / 1000;
 		Runner.elapsed = elapsed;
+		if (Runner.mov) Runner.sceneTime += dt;
 
 		// orbit camera: advance auto-motion, refresh basis and feeds
 		if (root.Cam && root.Cam.tick) root.Cam.tick(dt, elapsed);
@@ -485,14 +549,24 @@ void main() {
 			const d = dateVec();
 			gl.uniform4f(u.iDate, d[0], d[1], d[2], d[3]);
 		}
-		uploadShaderUniforms(gl, u, Runner.current, elapsed);
+		uploadShaderUniforms(gl, u, Runner.current, Runner.sceneTime);
 		bindChannel(gl, Runner.program, u, 0);
 		bindChannel(gl, Runner.program, u, 1);
 		bindChannel(gl, Runner.program, u, 2);
 		bindChannel(gl, Runner.program, u, 3);
 
-		gl.bindVertexArray(Runner.vao);
-		gl.drawArrays(gl.TRIANGLES, 0, 3);
+		const w = wh[0], h = wh[1];
+		const useAA = Runner.aa && Runner.smaa && w <= Runner.smaaMaxW && h <= Runner.smaaMaxH;
+		if (useAA) {
+			ensureSceneFBO(gl, w, h);
+			gl.bindFramebuffer(gl.FRAMEBUFFER, Runner.sceneFBO);
+			drawScene(gl);
+			gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+			Runner.smaa.run(Runner.sceneTex, w, h);
+		} else {
+			gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+			drawScene(gl);
+		}
 
 		Runner.frame++;
 		// raw frame timestamps; the smoothed FPS is computed in ui.tick()
@@ -540,9 +614,29 @@ void main() {
 	// internal iMouse array (pointer/touch handling in camera.js writes to it).
 	// `helpers` exposes the pure source-assembly functions so the benchmark
 	// (js/bench.js) can build and compile the very same GLSL on its own context.
-	const api = { init, select, run, stop, stats, mouse: Runner.mouse };
+	// AA toggle. Flips Runner.aa; if going off→on and the canvas has a non-zero
+	// size, the scene FBO is allocated immediately so the first AA frame
+	// doesn't stall on first-use FBO creation.
+	function setAA(on) {
+		const next = !!on && !!Runner.smaa;
+		if (Runner.aa === next) return;
+		Runner.aa = next;
+		if (next && Runner.canvas) {
+			const w = Runner.canvas.width, h = Runner.canvas.height;
+			if (w > 0 && h > 0) ensureSceneFBO(Runner.gl, w, h);
+		}
+		if (Runner.onAAChange) Runner.onAAChange();
+	}
+	function getAA() { return Runner.aa; }
+
+	function setMov(on) { Runner.mov = !!on; }
+	function getMov() { return Runner.mov; }
+
+	const api = { init, select, run, stop, stats, setAA, getAA, setMov, getMov, mouse: Runner.mouse };
+	api.onAAChangeSetter = (f) => { Runner.onAAChange = f; };
 	api.helpers = { VS, FS_FOOTER, buildFSHeader, buildUniformDecls, resolveChannelKinds, detectCubeChannels };
 	Object.defineProperty(api, 'current', { get: () => Runner.current });
 	Object.defineProperty(api, 'elapsed', { get: () => Runner.elapsed });
+	Object.defineProperty(api, 'sceneTime', { get: () => Runner.sceneTime });
 	root.Runner = api;
 })(typeof window !== 'undefined' ? window : globalThis);
