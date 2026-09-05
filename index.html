@@ -30,6 +30,32 @@
 	#params select { background: #2a2a2a; color: #ddd; border: 1px solid #3a3a3a; font: inherit; padding: 2px 4px; }
 	#info { padding: 6px 10px; background: #1b1b1b; border-top: 1px solid #2a2a2a; display: flex; gap: 16px; }
 	#err { color: #f55; white-space: pre-wrap; max-height: 30vh; overflow: auto; }
+
+	/* ---- benchmark panel ---- */
+	#bench-panel { position: fixed; top: 44px; right: 8px; bottom: 8px; width: 400px; max-width: calc(100vw - 24px);
+		background: #141414; border: 1px solid #2c2c2c; border-radius: 6px; padding: 8px 10px;
+		z-index: 20; display: none; flex-direction: column; gap: 8px; overflow: auto; }
+	#bench-panel.open { display: flex; }
+	#bench-panel .bench-head { display: flex; align-items: center; justify-content: space-between; color: #9c9; }
+	#bench-panel button { background: #2a2a2a; color: #ddd; border: 1px solid #3a3a3a; padding: 4px 8px; cursor: pointer; font: inherit; }
+	#bench-panel button:disabled { opacity: 0.45; cursor: default; }
+	#bench-panel .bench-settings { display: flex; align-items: center; gap: 5px; color: #999; flex-wrap: wrap; }
+	#bench-panel select { background: #2a2a2a; color: #ddd; border: 1px solid #3a3a3a; font: inherit; padding: 2px 4px; }
+	#bench-panel .bench-buttons { display: flex; gap: 8px; }
+	#bench-panel .bench-preview { text-align: center; }
+	#bench-panel canvas { max-width: 100%; max-height: 150px; background: #000; border: 1px solid #222; }
+	#bench-panel .bench-note { color: #888; font-size: 11px; line-height: 1.35; }
+	#bench-panel .bench-rows { display: flex; flex-direction: column; gap: 5px; }
+	#bench-panel .bench-row { border: 1px solid #262626; border-radius: 4px; padding: 4px 6px; background: #191919; }
+	#bench-panel .bench-row.current { border-color: #396; }
+	#bench-panel .bench-row.winner { border-color: #a83; background: #201b12; }
+	#bench-panel .bench-row.timeout { border-color: #633; }
+	#bench-panel .bench-row.slow { border-color: #663; }
+	#bench-panel .bench-name { color: #9c9; }
+	#bench-panel .bench-src { color: #555; font-size: 11px; }
+	#bench-panel .bench-metrics { color: #aaa; font-size: 12px; }
+	#bench-panel .bench-summary { color: #888; font-size: 11px; white-space: pre-line; }
+	#bar button#copy-prompt { border-color: #3a5a3a; }
 </style>
 </head>
 <body>
@@ -40,6 +66,8 @@
 		<span style="flex:1"></span>
 		<button id="cam" title="camera auto-orbit: 'auto' orbits until you move the camera (drag, wheel, pinch), then turns off; 'on' always orbits; 'off' never orbits">cam: auto</button>
 		<label id="music-wrap" class="off" title="play the shader's procedural music"><input type="checkbox" id="music" disabled> music</label>
+		<button id="bench" title="benchmark the multi-bubble shaders on the same 16-64 bubble scene; GPU ms is measured via gl.finish() so display refresh limits don't skew it">benchmark</button>
+		<button id="copy-prompt" title="copy a prompt asking an LLM to implement a shader like the currently selected one (tech description + GitHub link)">copy prompt</button>
 		<span id="fps" style="color:#888">-- fps</span>
 	</div>
 	<div id="stage">
@@ -63,11 +91,18 @@
 	<script src="shaders/multi_thinfilm.js"></script>
 	<script src="shaders/thick_glass.js"></script>
 	<script src="shaders/thick_analytic.js"></script>
+	<script src="shaders/bench_fresnel.js"></script>
+	<script src="shaders/bench_thick.js"></script>
+	<script src="shaders/bench_hollow.js"></script>
+	<script src="shaders/bench_thinfilm.js"></script>
+	<script src="shaders/bench_chain.js"></script>
 	<script src="js/scene.js"></script>
 	<script src="js/camera.js"></script>
 	<script src="js/audio.js"></script>
 	<script src="js/shaders.js"></script>
 <script src="js/runner.js"></script>
+<script src="js/prompts.js"></script>
+<script src="js/bench.js"></script>
 <script src="js/ui.js"></script>
 </body>
 </html>

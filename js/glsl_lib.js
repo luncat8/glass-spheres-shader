@@ -63,6 +63,20 @@ vec3 absorbOf (int i) {
 }
 `;
 
+	// shared per-bubble Beer-Lambert tint (used by the thick-wall / chain variants;
+	// hue spreads over the golden ratio so overlapping bubbles stay readable)
+	GLSL.absorb = `vec3 absorbOf (int i) {
+	float f = fract (float (i) * 0.6180339887);
+	vec3 a = vec3 (0.35, 0.20, 0.10);
+	vec3 b = vec3 (0.10, 0.30, 0.45);
+	vec3 c = vec3 (0.40, 0.10, 0.25);
+	vec3 d = vec3 (0.15, 0.40, 0.15);
+	if (f < 0.33) return mix (a, b, f / 0.33);
+	if (f < 0.66) return mix (b, c, (f - 0.33) / 0.33);
+	return mix (c, d, (f - 0.66) / 0.34);
+}
+`;
+
 	// Analytic environments for the glass scenes, with three selectable
 	// "interiors" (uScene int, see the shader uiScene params):
 	//   0 = checker land (hollow_bubbles style), 1 = rainbow (llsSDf style),

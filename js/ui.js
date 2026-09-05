@@ -3,7 +3,7 @@
 	if (typeof module === 'object' && module.exports) { module.exports = {}; return; }
 
 	let canvas, statusEl, metaEl, errEl, fpsEl, bar, buttonsHost, paramsHost;
-	let musicChk, musicWrap, camBtn;
+	let musicChk, musicWrap, camBtn, copyBtn;
 	let runner;
 	let firstShader = null;
 	let pendingErr = '';
@@ -122,6 +122,52 @@
 		camBtn.textContent = window.Cam ? window.Cam.label() : 'cam';
 	}
 
+	// -------------------------------------------------- copy prompt button
+
+	function flashBtn(btn, text, ms) {
+		const old = btn.textContent;
+		btn.textContent = text;
+		setTimeout(() => { btn.textContent = old; }, ms || 1200);
+	}
+
+	function fallbackCopy(text, cb) {
+		const ta = document.createElement('textarea');
+		ta.value = text;
+		ta.style.position = 'fixed';
+		ta.style.opacity = '0';
+		document.body.appendChild(ta);
+		ta.select();
+		let ok = false;
+		try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+		document.body.removeChild(ta);
+		cb(ok);
+	}
+
+	function copyText(text, cb) {
+		if (navigator.clipboard && navigator.clipboard.writeText) {
+			navigator.clipboard.writeText(text).then(() => cb(true), () => fallbackCopy(text, cb));
+		} else if (fallbackCopy) {
+			fallbackCopy(text, cb);
+		} else {
+			cb(false);
+		}
+	}
+
+	// "copy prompt": copies a prompt that asks an LLM to implement a shader
+	// like the currently selected one, with a short tech description and the
+	// GitHub link to that shader file.
+	function copyPrompt() {
+		const meta = runner && runner.current;
+		if (!meta) { flashBtn(copyBtn, 'no shader', 1200); return; }
+		const text = window.Prompts ? window.Prompts.textFor(meta) : '';
+		copyText(text, (ok) => flashBtn(copyBtn, ok ? 'copied ✓' : 'copy failed', 1500));
+	}
+
+	function promptText() {
+		const meta = runner && runner.current;
+		return meta && window.Prompts ? window.Prompts.textFor(meta) : '';
+	}
+
 	function fmt(v, step) {
 		return (step >= 1) ? String(v | 0) : v.toFixed(step >= 0.1 ? 1 : (step >= 0.01 ? 2 : 3));
 	}
@@ -144,6 +190,7 @@
 			buildParams(meta);
 			syncMusic(meta, true);
 			updateCam();
+			if (copyBtn) copyBtn.title = window.Prompts ? window.Prompts.summary(meta) : '';
 			setActive(id);
 			setErr('');
 			statusEl.textContent = 'rendering';
@@ -171,6 +218,7 @@
 		musicChk = document.getElementById('music');
 		musicWrap = document.getElementById('music-wrap');
 		camBtn = document.getElementById('cam');
+		copyBtn = document.getElementById('copy-prompt');
 
 		const list = window.SHADERS || [];
 		if (!list.length) {
@@ -200,6 +248,10 @@
 		camBtn.addEventListener('click', () => {
 			if (window.Cam) { window.Cam.cycleMode(); updateCam(); }
 		});
+		if (copyBtn) {
+			copyBtn.title = window.Prompts ? window.Prompts.summary(runner.current) : 'copy the LLM prompt for the current shader';
+			copyBtn.addEventListener('click', copyPrompt);
+		}
 		// boot first shader
 		pick(firstShader);
 		runner.run();
@@ -216,6 +268,8 @@
 			cycleCam: () => { if (window.Cam) { window.Cam.cycleMode(); updateCam(); } },
 			music: () => (window.AudioM ? window.AudioM.isActive() : false),
 			setMusic: (v) => { musicChk.checked = !!v; syncMusic(runner.current); },
+			copyPrompt,
+			promptText,
 		};
 	}
 

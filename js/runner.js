@@ -528,8 +528,11 @@ void main() {
 
 	// `current` is a live getter so external code (ui, browser checks) sees the
 	// meta of the selected shader without a manual refresh; `mouse` shares the
-	// internal iMouse array (pointer/touch handling in camera.js writes to it)
+	// internal iMouse array (pointer/touch handling in camera.js writes to it).
+	// `helpers` exposes the pure source-assembly functions so the benchmark
+	// (js/bench.js) can build and compile the very same GLSL on its own context.
 	const api = { init, select, run, stop, stats, mouse: Runner.mouse };
+	api.helpers = { VS, FS_FOOTER, buildFSHeader, buildUniformDecls, resolveChannelKinds, detectCubeChannels };
 	Object.defineProperty(api, 'current', { get: () => Runner.current });
 	Object.defineProperty(api, 'elapsed', { get: () => Runner.elapsed });
 	root.Runner = api;
