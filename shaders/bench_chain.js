@@ -13,7 +13,7 @@ ${GLSL.camera}
 ${GLSL.env}
 ${GLSL.absorb}
 
-#define MAXSTEPS 64
+#define MAXSTEPS 48
 #define MAXDIS   40.0
 #define SURF     0.004
 #define HOPS     3

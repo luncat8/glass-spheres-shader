@@ -491,6 +491,9 @@ float fbm3 (vec2 p, float drift) {
 	// world geometry like GLSL.cageOverlay: the renderer keeps drawing its own
 	// objects and composites the land at its measured depth. Requires
 	// GLSL.common, GLSL.env, GLSL.shape (boxHit) and GLSL.simplex.
+	// LAND_MAX_STEPS was 96 — reduced to 64 after reports of very slow first
+	// compile (driver shader cache makes later runs fast). The param still
+	// offers 32/64, 96 would force a 96-unroll that some drivers choke on.
 	GLSL.land = `#define LAND_SKIRT 1.0
 #define LAND_IOR 1.45
 #define WATER_IOR 1.33
@@ -502,7 +505,7 @@ float fbm3 (vec2 p, float drift) {
 #define LAND_SUN vec3 (0.50, 0.46, 0.40)
 #define LAND_AMBIENT vec3 (0.18, 0.21, 0.26)
 #define LAND_OFFSET vec2 (17.3, 9.1)
-#define LAND_MAX_STEPS 96
+#define LAND_MAX_STEPS 64
 
 float landHeight (vec2 xz) {
 	return uLandBase + uLandAmp * fbm3 ((xz + LAND_OFFSET) * uLandFreq, iTime * uLandDrift);
@@ -525,7 +528,8 @@ vec3 landNormal (vec2 xz) {
 }
 
 // first crossing of the terrain on [t0, t1] (the start is above it): equal
-// steps, then five bisections. -1.0 when the ray stays above the terrain.
+// steps, then four bisections. -1.0 when the ray stays above the terrain.
+// (was 5 bisections + 96 max steps — reduced after slow-compile reports)
 float landMarch (vec3 ro, vec3 rd, float t0, float t1, int steps) {
 	float dt = (t1 - t0) / float (steps);
 	if (dt <= 0.0) return -1.0;
@@ -535,7 +539,7 @@ float landMarch (vec3 ro, vec3 rd, float t0, float t1, int steps) {
 		float b = t0 + dt * float (i);
 		vec3 p = ro + rd * b;
 		if (p.y > landHeight (p.xz)) { a = b; continue; }
-		for (int j = 0; j < 5; j++) {
+		for (int j = 0; j < 4; j++) {
 			float m = 0.5 * (a + b);
 			p = ro + rd * m;
 			if (p.y > landHeight (p.xz)) a = m; else b = m;
@@ -662,7 +666,7 @@ vec3 landOverlay (vec3 behind, vec3 ro, vec3 rd, float objT) {
 			{ name: 'uLandStyle', type: 'int', label: 'look', def: 0, scenes: ['terrain'], hint: 'glass land: the whole block is glass; colour land: opaque height-colourised land with glass water',
 				options: [{ value: 0, label: 'glass land' }, { value: 1, label: 'colour land' }] },
 			{ name: 'uLandSteps', type: 'int', label: 'land steps', def: 64, scenes: ['terrain'], hint: 'march budget of the terrain per ray (lower on integrated GPUs)',
-				options: [{ value: 32, label: '32' }, { value: 64, label: '64' }, { value: 96, label: '96' }] },
+				options: [{ value: 32, label: '32' }, { value: 64, label: '64' }] },
 			{ name: 'uLandDrift', type: 'float', label: 'drift', min: 0.0, max: 0.3, step: 0.01, def: 0.0, scenes: ['terrain'], hint: 'slow morphing of the relief' },
 		];
 	};

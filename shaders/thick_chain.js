@@ -48,7 +48,7 @@ ${GLSL.selGlow}
 ${GLSL.simplex}
 ${GLSL.land}
 
-#define MAXSTEPS 64
+#define MAXSTEPS 48
 #define MAXDIS   40.0
 #define SURF     0.004
 #define HOPS     3

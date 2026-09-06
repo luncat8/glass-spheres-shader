@@ -68,12 +68,31 @@
 			(ps.length ? ', GUI-driven parameters' : '') + '; see the reference file for details.');
 	}
 
+	function fmtVal(v, step) {
+		if (v === undefined || v === null) return '';
+		if (step !== undefined) {
+			return (step >= 1) ? String(v | 0) : v.toFixed(step >= 0.1 ? 1 : (step >= 0.01 ? 2 : 3));
+		}
+		if (Math.abs(v - Math.round(v)) < 0.0005) return String(Math.round(v));
+		return String(v);
+	}
+
 	// long prompt to hand to an LLM
 	function textFor(meta) {
 		const id = (meta && meta.id) || 'shader';
 		const t = T[id] || { tech: describe(meta), file: id + '.js' };
 		const title = (meta && meta.title) || id;
-		return [
+
+		// current scene / shape, if the UI is up
+		let curScene = null, curShape = null;
+		try {
+			if (root.__app) {
+				if (typeof root.__app.scene === 'function') curScene = root.__app.scene();
+				if (typeof root.__app.shape === 'function') curShape = root.__app.shape();
+			}
+		} catch (e) {}
+
+		const lines = [
 			'Implement a bubble shader similar to the currently selected shader in this project.',
 			'',
 			'Project: glass-spheres-shader  https://github.com/luncat8/glass-spheres-shader',
@@ -81,16 +100,40 @@
 			'Tech summary: ' + t.tech,
 			'Reference shader file: ' + GIT_BASE + t.file,
 			'',
-			'Follow the project conventions:',
-			'  * classic <script>, no modules and no build; work from file://.',
-			'  * expose window.SHADER_<id> = { id, title, channels, arrays, vars, params, source }.',
-			'  * WebGL2; fragment entry mainImage(out vec4 fragColor, in vec2 fragCoord) with Shadertoy-style uniforms (iResolution, iTime, iMouse, iChannel0..3).',
-			'  * the per-frame loop must allocate nothing (reuse preallocated Float32Array buffers for array uniforms).',
-			'  * keep it safe on old/integrated GPUs: bounded loops, analytic or few-step marcher, adaptive quality instead of unbounded marching.',
-			'  * match the visuals of the selected shader, and keep provided params as new default.',
-			'',
-			'complete shaders/' + t.file + ' wrapper (GLSL inside a template literal) that drops into the project untouched.',
-		].join('\n');
+			'selected settings:',
+		];
+		if (curScene) lines.push('scene ' + curScene);
+		if (curShape) lines.push('shape ' + curShape);
+		const ps = (meta && meta.params) || [];
+		for (let i = 0; i < ps.length; i++) {
+			const p = ps[i];
+			if (p.hidden) continue;
+			if (p.scenes && curScene && p.scenes.indexOf(curScene) === -1) continue;
+			if (p.shapes && curShape && p.shapes.indexOf(curShape) === -1) continue;
+			const label = p.label || p.name;
+			let v = (p.value !== undefined ? p.value : p.def);
+			if (v === undefined) continue;
+			let vStr;
+			if (p.options && p.options.length) {
+				const opt = p.options.find((o) => o.value === v || String(o.value) === String(v));
+				if (opt) vStr = opt.label + ' (' + fmtVal(v, p.step) + ')';
+				else vStr = fmtVal(v, p.step);
+			} else {
+				vStr = fmtVal(v, p.step);
+			}
+			lines.push(label + ' ' + vStr);
+		}
+		lines.push('');
+		lines.push('Follow the project conventions:');
+		lines.push('  * classic <script>, no modules and no build; work from file://.');
+		lines.push('  * expose window.SHADER_<id> = { id, title, channels, arrays, vars, params, source }.');
+		lines.push('  * WebGL2; fragment entry mainImage(out vec4 fragColor, in vec2 fragCoord) with Shadertoy-style uniforms (iResolution, iTime, iMouse, iChannel0..3).');
+		lines.push('  * the per-frame loop must allocate nothing (reuse preallocated Float32Array buffers for array uniforms).');
+		lines.push('  * keep it safe on old/integrated GPUs: bounded loops, analytic or few-step marcher, adaptive quality instead of unbounded marching.');
+		lines.push('  * match the visuals of the selected shader, and keep provided params as new default.');
+		lines.push('');
+		lines.push('complete shaders/' + t.file + ' wrapper (GLSL inside a template literal) that drops into the project untouched.');
+		return lines.join('\n');
 	}
 
 	// short one-liner, used as the button tooltip

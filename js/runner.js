@@ -262,26 +262,49 @@ void main() {
 	}
 
 	function compile(gl, type, src) {
+		const label = type === gl.VERTEX_SHADER ? 'VS' : 'FS';
+		const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
 		const sh = gl.createShader(type);
 		gl.shaderSource(sh, src);
 		gl.compileShader(sh);
+		const dt = (typeof performance !== 'undefined' && performance.now) ? (performance.now() - t0) : 0;
+		if (dt > 100) {
+			try { console.log('[Runner] '+label+' compile took '+dt.toFixed(1)+'ms len='+src.length+' lines='+src.split('\n').length); } catch(e){}
+		}
 		if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
 			const log = gl.getShaderInfoLog(sh);
 			gl.deleteShader(sh);
-			throw new Error('shader compile failed:\n' + log + '\n--- source ---\n' + src);
+			// include timing in error for debug
+			throw new Error('shader compile failed ('+label+' '+dt.toFixed(1)+'ms):\n' + log + '\n--- source ---\n' + src.slice(0, 4000));
 		}
 		return sh;
 	}
 
 	function link(gl, vs, fs) {
+		const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
 		const prog = gl.createProgram();
 		gl.attachShader(prog, vs);
 		gl.attachShader(prog, fs);
+		// KHR_parallel_shader_compile lets the driver compile in background;
+		// we still have to block here, but at least we can log if it was slow
+		// and the extension is present.
 		gl.linkProgram(prog);
+		// If the parallel extension is available, poll completion to avoid
+		// blocking the main thread too long on some drivers (best-effort).
+		const ext = gl.getExtension('KHR_parallel_shader_compile');
+		if (ext) {
+			// Some drivers compile async; wait a bit with a non-blocking loop
+			// that still yields to the event loop via a short timeout is not
+			// possible here (sync API), but we can at least detect slow path.
+		}
+		const dt = (typeof performance !== 'undefined' && performance.now) ? (performance.now() - t0) : 0;
+		if (dt > 100) {
+			try { console.log('[Runner] program link took '+dt.toFixed(1)+'ms'); } catch(e){}
+		}
 		if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
 			const log = gl.getProgramInfoLog(prog);
 			gl.deleteProgram(prog);
-			throw new Error('program link failed:\n' + log);
+			throw new Error('program link failed ('+dt.toFixed(1)+'ms):\n' + log);
 		}
 		return prog;
 	}
@@ -443,6 +466,7 @@ void main() {
 	}
 
 	function select(id) {
+		const tSel0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
 		const list = window.SHADERS || [];
 		let meta = null;
 		for (let i = 0; i < list.length; i++) if (list[i].id === id) { meta = list[i]; break; }
@@ -469,6 +493,11 @@ void main() {
 		Runner.frame = 0;
 		Runner.fpsSamples.length = 0;
 		Runner.sceneTime = 0;
+		const tSel1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
+		const dt = tSel1 - tSel0;
+		if (dt > 100) {
+			try { console.log('[Runner] select('+id+') total ' + dt.toFixed(1) + 'ms srcLen=' + src.length); } catch(e){}
+		}
 		return meta;
 	}
 
