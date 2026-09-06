@@ -1,10 +1,11 @@
 // camera.js — shared orbit camera for the 3D bubble shaders.
 // Owns yaw / pitch / distance / target, the auto-orbit modes, and all pointing
 // input: press-drag (mouse, pointer, touch), wheel zoom, pinch zoom, and
-// click-to-select / click-outside-to-deselect a bubble (ray pick against the
-// same sphere data the shaders draw). The runner uploads the camera basis
-// every frame through the feeds registered below (camPos / camRt / camUp /
-// camFw / camSel); shaders declare matching `vars` in their metadata.
+// click-to-select / click-outside-to-deselect an object (ray pick against the
+// same object and spin data the shaders draw, through Shapes.hit). The runner
+// uploads the camera basis every frame through the feeds registered below
+// (camPos / camRt / camUp / camFw / camSel / camSelRot); shaders declare
+// matching `vars` in their metadata.
 //
 // Only shaders that declare `uCamPos` in `vars` consume that basis, and only
 // they are orbited, zoomed, picked and auto-spun (see sharedCam()). Shaders
@@ -37,9 +38,11 @@
 		mode: 0, // see header; 0 = auto-until-first-manual-move (the default)
 		yaw: 0.0,
 		pitch: AUTO_PITCH,
+		autoPitch: AUTO_PITCH, // where auto mode settles; each shared scene sets its own
 		dist: 7.5,
 		target: [0, 0, 0],
-		sel: [0, 0, 0, 0],   // selected bubble centre + radius (w = 0 => none)
+		sel: [0, 0, 0, 0],   // selected object centre + bounding radius (w = 0 => none)
+		selRot: [0, 0, 0, 0], // its spin (unit axis, angle); zero axis = a plain sphere
 		selSrc: null,       // { kind: <array feed name>, idx } or null
 		onModeChange: null, // ui hook to refresh the camera button label
 	};
@@ -48,6 +51,7 @@
 	const fw = [0, 0, 0], rt = [0, 0, 0], up = [0, 0, 0], pos = [0, 0, 0];
 	const ray = [0, 0, 0];
 	const cagePick = new Float32Array((61 + 3) * 4); // merged only on click
+	const noSpin = new Float32Array(4);  // the top balls and spin-less shaders
 	const feeds = {};                    // filled below, registered once
 
 	let canvas = null, runner = null;
@@ -105,8 +109,16 @@
 
 	function clearSel() {
 		Cam.sel[0] = 0; Cam.sel[1] = 0; Cam.sel[2] = 0; Cam.sel[3] = 0;
+		Cam.selRot[0] = 0; Cam.selRot[1] = 0; Cam.selRot[2] = 0; Cam.selRot[3] = 0;
 		Cam.selSrc = null;
 		Cam.target[0] = 0; Cam.target[1] = 0; Cam.target[2] = 0;
+	}
+
+	// selection = the object at buf[j..j+3] with the spin at spin[k..k+3]
+	function setSel(buf, j, spin, k) {
+		Cam.sel[0] = buf[j]; Cam.sel[1] = buf[j + 1]; Cam.sel[2] = buf[j + 2]; Cam.sel[3] = buf[j + 3];
+		Cam.selRot[0] = spin[k]; Cam.selRot[1] = spin[k + 1]; Cam.selRot[2] = spin[k + 2]; Cam.selRot[3] = spin[k + 3];
+		Cam.target[0] = buf[j]; Cam.target[1] = buf[j + 1]; Cam.target[2] = buf[j + 2];
 	}
 
 	// eye / basis from yaw-pitch-distance, same rig as the old iMouse camera
@@ -166,7 +178,15 @@
 		return null;
 	}
 
-	// Locate the pickable sphere set for the current shader. In the cage scene
+	// the shader's spin buffer, refreshed for `time`; noSpin when it has none
+	function spinBuf(meta, time) {
+		const arr = findArray(meta, 'spin');
+		if (!arr) return noSpin;
+		root.Feeds.spin(time, meta, arr.buf);
+		return arr.buf;
+	}
+
+	// Locate the pickable object set for the current shader. In the cage scene
 	// the top balls are a second uniform, so both active prefixes are copied
 	// into one preallocated buffer for the click ray cast. This runs on clicks,
 	// never in the frame loop.
@@ -181,20 +201,21 @@
 			if (!mainFeed) return null;
 			mainFeed(time, meta, main.buf);
 			const ni = activeCount(meta, main);
-			if (!cageScene || !cageTop) return { arr: main.buf, n: ni, kind: main.feed };
+			const spin = spinBuf(meta, time);
+			if (!cageScene || !cageTop) return { arr: main.buf, n: ni, kind: main.feed, spin, split: ni };
 
 			const topFeed = root.Feeds && root.Feeds[cageTop.feed];
-			if (!topFeed) return { arr: main.buf, n: ni, kind: main.feed };
+			if (!topFeed) return { arr: main.buf, n: ni, kind: main.feed, spin, split: ni };
 			topFeed(time, meta, cageTop.buf);
 			const nt = Math.min(cageTop.count, Math.max(0, Math.round(paramVal(meta, 'uTopCount', cageTop.count))));
 			for (let i = 0; i < ni * 4; i++) cagePick[i] = main.buf[i];
 			for (let i = 0; i < nt * 4; i++) cagePick[ni * 4 + i] = cageTop.buf[i];
-			return { arr: cagePick, n: ni + nt, kind: 'cage', split: ni, insideKind: main.feed };
+			return { arr: cagePick, n: ni + nt, kind: 'cage', split: ni, insideKind: main.feed, spin };
 		}
 		return null;
 	}
 
-	// keep the selection and the orbit target glued to the (moving) bubble
+	// keep the selection and the orbit target glued to the (moving, tumbling) object
 	function updateSelPos() {
 		const s = Cam.selSrc;
 		const meta = runner && runner.current;
@@ -212,9 +233,8 @@
 		const feed = root.Feeds && root.Feeds[s.kind];
 		if (feed) feed(time, meta, src);
 		if (s.idx >= n) { clearSel(); return; }
-		const j = s.idx * 4;
-		Cam.sel[0] = src[j]; Cam.sel[1] = src[j + 1]; Cam.sel[2] = src[j + 2]; Cam.sel[3] = src[j + 3];
-		Cam.target[0] = src[j]; Cam.target[1] = src[j + 1]; Cam.target[2] = src[j + 2];
+		const spin = s.kind === 'cageTop' ? noSpin : spinBuf(meta, time);
+		setSel(src, s.idx * 4, spin, spin === noSpin ? 0 : s.idx * 4);
 	}
 
 	// called by runner.frame() every rendered frame
@@ -222,14 +242,15 @@
 		if (!sharedCam()) return;
 		if (Cam.mode !== 2) {
 			Cam.yaw += AUTO_SPEED * dt;
-			Cam.pitch += (AUTO_PITCH - Cam.pitch) * Math.min(1.0, dt * 0.5);
+			Cam.pitch += (Cam.autoPitch - Cam.pitch) * Math.min(1.0, dt * 0.5);
 		}
 		updateSelPos();
 		basis();
 	}
 
-	// click pick: ray-cast the same spheres the shader draws. Select the
-	// nearest bubble under the cursor, or deselect when the click misses.
+	// click pick: ray-cast the same objects the shader draws (Shapes.hit, with
+	// the shader's uShape; the cage's top balls are always spheres). Select the
+	// nearest object under the cursor, or deselect when the click misses.
 	// x/y are canvas-relative CSS pixels (PointerEvent offsetX/offsetY).
 	function pick(x, y) {
 		const meta = runner && runner.current;
@@ -250,34 +271,27 @@
 		const rl = Math.sqrt(ray[0] * ray[0] + ray[1] * ray[1] + ray[2] * ray[2]) || 1.0;
 		ray[0] /= rl; ray[1] /= rl; ray[2] /= rl;
 
+		const shape = paramVal(meta, 'uShape', 0);
+		const spinLen = p.spin.length >> 2;
 		let best = 1e9, bi = -1;
 		const arr = p.arr, n = p.n;
 		for (let i = 0; i < n; i++) {
 			const j = i * 4;
-			const rr = arr[j + 3];
-			if (rr <= 0.0) continue;
-			const ox = pos[0] - arr[j], oy = pos[1] - arr[j + 1], oz = pos[2] - arr[j + 2];
-			const B = 2.0 * (ox * ray[0] + oy * ray[1] + oz * ray[2]);
-			const C = ox * ox + oy * oy + oz * oz - rr * rr;
-			const D = B * B - 4.0 * C;
-			if (D < 0.0) continue;
-			const t = (-B - Math.sqrt(D)) * 0.5;
+			if (arr[j + 3] <= 0.0) continue;
+			const spun = i < p.split && i < spinLen;
+			const t = root.Shapes.hit(spun ? shape : 0, pos, ray, arr, j, spun ? p.spin : noSpin, spun ? j : 0);
 			if (t > 0.001 && t < best) { best = t; bi = i; }
 		}
 
-		if (bi >= 0) {
-			const j = bi * 4;
-			Cam.sel[0] = arr[j]; Cam.sel[1] = arr[j + 1]; Cam.sel[2] = arr[j + 2]; Cam.sel[3] = arr[j + 3];
-			let kind = p.kind, idx = bi;
-			if (p.kind === 'cage') {
-				kind = bi < p.split ? p.insideKind : 'cageTop';
-				idx = bi < p.split ? bi : bi - p.split;
-			}
-			Cam.selSrc = { kind, idx };
-			Cam.target[0] = arr[j]; Cam.target[1] = arr[j + 1]; Cam.target[2] = arr[j + 2];
-		} else {
-			clearSel();
+		if (bi < 0) { clearSel(); return; }
+		const spun = bi < p.split && bi < spinLen;
+		setSel(arr, bi * 4, spun ? p.spin : noSpin, spun ? bi * 4 : 0);
+		let kind = p.kind, idx = bi;
+		if (p.kind === 'cage') {
+			kind = bi < p.split ? p.insideKind : 'cageTop';
+			idx = bi < p.split ? bi : bi - p.split;
 		}
+		Cam.selSrc = { kind, idx };
 	}
 
 	// ---------------------------------------------------------------- input
@@ -375,6 +389,17 @@
 		clearSel();
 	}
 
+	// called by ui on scene select: each shared scene presents itself from its
+	// own default distance and pitch (the land block is far bigger than the
+	// cloud and is looked at from above, pitch < 0), and auto mode settles on
+	// that pitch; a shader switch never touches the view
+	function frame(scene) {
+		if (!scene || !(scene.camDist > 0)) return;
+		Cam.dist = clamp(scene.camDist, MIN_DIST, MAX_DIST);
+		Cam.pitch = clamp(scene.camPitch, -PITCH_MAX, PITCH_MAX);
+		Cam.autoPitch = Cam.pitch;
+	}
+
 	// ---------------------------------------------- per-frame uniform feeds
 
 	function writeVec(out, a) {
@@ -387,12 +412,15 @@
 	feeds.camSel = function (time, meta, out) {
 		out[0] = Cam.sel[0]; out[1] = Cam.sel[1]; out[2] = Cam.sel[2]; out[3] = Cam.sel[3];
 	};
+	feeds.camSelRot = function (time, meta, out) {
+		out[0] = Cam.selRot[0]; out[1] = Cam.selRot[1]; out[2] = Cam.selRot[2]; out[3] = Cam.selRot[3];
+	};
 
 	const Feeds = root.Feeds = root.Feeds || {};
 	for (const k in feeds) Feeds[k] = feeds[k];
 
 	root.Cam = {
-		init, attach, tick, pick,
+		init, attach, frame, tick, pick,
 		shared: sharedCam, // does the selected shader consume the shared basis?
 		cycleMode: function () { setMode((Cam.mode + 1) % 3); },
 		label: modeLabel,
@@ -403,7 +431,7 @@
 		set onModeChange(f) { Cam.onModeChange = f; },
 		state: function () {
 			return { mode: Cam.mode, yaw: Cam.yaw, pitch: Cam.pitch, dist: Cam.dist,
-				target: Cam.target.slice(), sel: Cam.sel.slice() };
+				target: Cam.target.slice(), sel: Cam.sel.slice(), selRot: Cam.selRot.slice() };
 		},
 	};
 })(typeof window !== 'undefined' ? window : globalThis);

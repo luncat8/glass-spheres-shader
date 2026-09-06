@@ -12,7 +12,7 @@
 	#bar .row > strong small { color: #5c5c5c; font-weight: normal; }
 	#bar .group-tag { color: #5c5c5c; font-size: 11px; margin-left: 6px; }
 	#bar .group-tag:first-child { margin-left: 0; }
-	#bar #shader-buttons, #bar #scene-buttons { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+	#bar #shader-buttons, #bar #scene-buttons, #bar #shape-buttons { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 	#bar #combo-note { display: none; color: #d9a441; font-size: 11px; }
 	#bar button { background: #2a2a2a; color: #ddd; border: 1px solid #3a3a3a; padding: 4px 10px; cursor: pointer; font: inherit; }
 	#bar button.active { background: #396; color: #000; }
@@ -78,12 +78,16 @@
 <div id="app">
 	<div id="bar">
 		<div class="row">
-			<strong title="how bubbles are drawn: tracing / shading technique">shader <small>· how it draws - 💿 balls number - adjustable</small></strong>
+			<strong title="how the objects are drawn: tracing / shading technique">shader <small>· how it draws - 💿 objects number - adjustable</small></strong>
 			<span id="shader-buttons"></span>
 		</div>
 		<div class="row">
 			<strong title="where drawn (interior, land, background) and how they move">scene <small>· where + motion</small></strong>
 			<span id="scene-buttons"></span>
+		</div>
+		<div class="row">
+			<strong title="what every object is; the knot needs a raymarched renderer">shape <small>· what it is</small></strong>
+			<span id="shape-buttons"></span>
 			<span id="combo-note"></span>
 		</div>
 		<div class="row">
@@ -124,7 +128,9 @@
 	<script src="shaders/bench_hollow.js"></script>
 	<script src="shaders/bench_thinfilm.js"></script>
 	<script src="shaders/bench_chain.js"></script>
+	<script src="js/caps.js"></script>
 	<script src="js/scenes.js"></script>
+	<script src="js/shapes.js"></script>
 	<script src="js/scene.js"></script>
 	<script src="js/camera.js"></script>
 	<script src="js/audio.js"></script>

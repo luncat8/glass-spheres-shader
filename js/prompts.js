@@ -14,15 +14,15 @@
 			file: 'multi_fresnel.js',
 		},
 		multi_thinfilm: {
-			tech: 'Raymarched smooth-min union of animated spheres (soap-film merge), 6-wavelength thin-film interference and chromatic dispersion resampled to RGB; ~24 march steps with a 4-tap SDF normal.',
+			tech: 'Raymarched smooth-min union of animated objects (soap-film merge; sphere, cube, tetra or torus knot via the shared shape SDF), 6-wavelength thin-film interference and chromatic dispersion resampled to RGB; ~24 march steps with a 4-tap SDF normal.',
 			file: 'multi_thinfilm.js',
 		},
 		analytic_layers: {
-			tech: 'Analytic layered glass: one bounded ray/sphere pass over up to 61 spheres keeps the nearest three layers and composites them back to front. Scene-aware — in the cage scene it also draws depth-correct ray/segment wireframe edges, three gravity-driven vertical bounces on the top face and a procedural pastel-cloud sky.',
+			tech: 'Analytic layered glass: one bounded ray/shape pass (sphere, spun cube or tetra, exact enter/exit with normals) over up to 61 objects keeps the nearest three layers and composites them back to front. Scene-aware — in the cage scene it also draws depth-correct ray/segment wireframe edges, three gravity-driven vertical bounces on the top face and a procedural pastel-cloud sky; in the glass-land scene a simplex heightfield block with a lake is composed at its depth.',
 			file: 'analytic_layers.js',
 		},
 		hollow_bubbles: {
-			tech: 'Analytic membrane tracing: each ray crosses thin glass shells (outer + inner sphere per bubble, up to 10 layers), refracting through the wall with Fresnel, Beer-Lambert tint and thin-film iridescence; JS feeds a uBubbles vec4[32] array uniform.',
+			tech: 'Analytic membrane tracing: each ray crosses thin glass shells (outer + inner surface per object — sphere, spun cube or tetra — up to 10 layers), refracting through the wall with Fresnel, Beer-Lambert tint and thin-film iridescence; JS feeds uBubbles / uSpin vec4[32] array uniforms; scene-aware (cage, glass-land heightfield).',
 			file: 'hollow_bubbles.js',
 		},
 		thick_glass: {
@@ -30,15 +30,15 @@
 			file: 'thick_glass.js',
 		},
 		thick_analytic: {
-			tech: 'Solid-glass spheres shaded analytically and depth-sorted back-to-front with a 5-comparator sorting network, then composited over a shared procedural environment.',
+			tech: 'Solid-glass objects (sphere, spun cube or tetra) shaded analytically from exact enter/exit crossings and depth-sorted back-to-front with a 5-comparator sorting network, then composited over a shared procedural environment and the scene geometry (cage, glass-land heightfield).',
 			file: 'thick_analytic.js',
 		},
 		thick_chain: {
-			tech: 'Raymarched smooth-min SDF of the bubbles with up to 3 refraction hops: the transmitted ray re-enters the scene carrying Fresnel loss and Beer-Lambert throughput between hops.',
+			tech: 'Raymarched smooth-min SDF of the objects (sphere, cube, tetra or torus knot) with up to 3 refraction hops: the transmitted ray re-enters the scene carrying Fresnel loss and Beer-Lambert throughput between hops; scene-aware (cage, glass-land heightfield).',
 			file: 'thick_chain.js',
 		},
 		thick_raymarch: {
-			tech: 'Raymarched smooth-min SDF with an inside march (negated SDF) per hit, refraction out, Beer-Lambert tint over the interior chord and up to 2 reflection bounces.',
+			tech: 'Raymarched smooth-min SDF of the objects (sphere, cube, tetra or torus knot) with an inside march (negated SDF) per hit, refraction out, Beer-Lambert tint over the interior chord and up to 2 reflection bounces; scene-aware (cage, glass-land heightfield).',
 			file: 'thick_raymarch.js',
 		},
 		XdXXzB: {
@@ -82,14 +82,14 @@
 			'Reference shader file: ' + GIT_BASE + t.file,
 			'',
 			'Follow the project conventions:',
-			'  * classic <script>, no modules and no build; must work from file://.',
+			'  * classic <script>, no modules and no build; work from file://.',
 			'  * expose window.SHADER_<id> = { id, title, channels, arrays, vars, params, source }.',
-			'  * WebGL2 only; fragment entry mainImage(out vec4 fragColor, in vec2 fragCoord) with Shadertoy-style uniforms (iResolution, iTime, iMouse, iChannel0..3).',
-			'  * single pass; the per-frame loop must allocate nothing (reuse preallocated Float32Array buffers for array uniforms).',
+			'  * WebGL2; fragment entry mainImage(out vec4 fragColor, in vec2 fragCoord) with Shadertoy-style uniforms (iResolution, iTime, iMouse, iChannel0..3).',
+			'  * the per-frame loop must allocate nothing (reuse preallocated Float32Array buffers for array uniforms).',
 			'  * keep it safe on old/integrated GPUs: bounded loops, analytic or few-step marcher, adaptive quality instead of unbounded marching.',
-			'  * match the visuals and behaviour of the selected shader, and keep the same slider params where they exist.',
+			'  * match the visuals of the selected shader, and keep provided params as new default.',
 			'',
-			'Reply with one complete shaders/' + t.file + ' wrapper (GLSL inside a template literal) that drops into the project untouched.',
+			'complete shaders/' + t.file + ' wrapper (GLSL inside a template literal) that drops into the project untouched.',
 		].join('\n');
 	}
 

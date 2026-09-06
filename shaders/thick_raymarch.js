@@ -1,6 +1,7 @@
-// v0.2 B — raymarched solid glass, smin-merged bubbles.
-// The 4 bubbles are a single SDF joined with a smooth union, so touching
-// bubbles fuse like blobs instead of intersecting hard. Each hit refracts in,
+// v0.2 B — raymarched solid glass, smin-merged objects.
+// The 4 objects (any shape, GLSL.shape's shapeSdf) are a single SDF joined with
+// a smooth union, so touching objects fuse like blobs instead of intersecting
+// hard. Each hit refracts in,
 // marches the inside with a negated SDF, refracts out, tints by Beer-Lambert
 // over the interior chord, and hands the reflection ray to the next bounce
 // (2 bounces).
@@ -8,11 +9,14 @@ window.SHADER_thick_raymarch = {
 	"id": "thick_raymarch",
 	"title": "solid glass bubbles - raymarched sdf, 2 bounces (4)",
 	"group": "scene",
-	"scenes": ["checker", "rainbow", "colorbox", "cage"],
+	"scenes": ["checker", "rainbow", "colorbox", "cage", "terrain"],
 	"nativeScene": "checker",
+	"shapes": ["sphere", "cube", "tetra", "knot"],
+	"nativeShape": "sphere",
 	"channels": { "0": "env_cube", "1": "env_cube", "2": "noise", "3": "noise" },
 	"arrays": [
 		{ "name": "uBubbles", "type": "vec4", "count": 4, "feed": "sceneBubbles4" },
+		{ "name": "uSpin", "type": "vec4", "count": 4, "feed": "spin" },
 		{ "name": "uTop", "type": "vec4", "count": 3, "feed": "cageTop" }
 	],
 	"vars": [
@@ -20,25 +24,31 @@ window.SHADER_thick_raymarch = {
 		{ "name": "uCamRt", "type": "vec3", "feed": "camRt" },
 		{ "name": "uCamUp", "type": "vec3", "feed": "camUp" },
 		{ "name": "uCamFw", "type": "vec3", "feed": "camFw" },
-		{ "name": "uSel", "type": "vec4", "feed": "camSel" }
+		{ "name": "uSel", "type": "vec4", "feed": "camSel" },
+		{ "name": "uSelRot", "type": "vec4", "feed": "camSelRot" }
 	],
 	"params": [
 		{ "name": "uScene", "type": "int", "def": 0, "hidden": true },
+		{ "name": "uShape", "type": "int", "def": 0, "hidden": true },
 		{ "name": "uSpread", "type": "float", "label": "spread", "min": 0.5, "max": 2.0, "step": 0.05, "def": 1.0, "scenes": ["checker", "rainbow", "colorbox"], "hint": "how far the four bubbles travel" },
 		{ "name": "uTopCount", "type": "int", "label": "on top", "min": 0, "max": 3, "step": 1, "def": 3, "scenes": ["cage"], "hint": "balls bouncing on the top face of the cage" },
 		{ "name": "uCageSize", "type": "float", "label": "cage", "min": 2.0, "max": 4.5, "step": 0.1, "def": 2.2, "scenes": ["cage"], "hint": "cube half-size" },
 		{ "name": "uSize", "type": "float", "label": "size", "min": 0.8, "max": 2.4, "step": 0.05, "def": 1.7, "scenes": ["cage"], "hint": "cage sphere radius scale" },
 		{ "name": "uWireWidth", "type": "float", "label": "wire", "min": 0.008, "max": 0.08, "step": 0.002, "def": 0.026, "scenes": ["cage"], "hint": "cage line thickness" },
-		{ "name": "uGravity", "type": "float", "label": "gravity", "min": 2.5, "max": 10.0, "step": 0.25, "def": 4.75, "scenes": ["cage"], "hint": "top-ball gravity" }
+		{ "name": "uGravity", "type": "float", "label": "gravity", "min": 2.5, "max": 10.0, "step": 0.25, "def": 4.75, "scenes": ["cage"], "hint": "top-ball gravity" },
+		...GLSL.landParams()
 	],
 	"source":
 `${GLSL.common}
 ${GLSL.raySphere}
+${GLSL.shape}
 ${GLSL.camera}
 ${GLSL.bubbles4}
 ${GLSL.env}
 ${GLSL.cageOverlay}
 ${GLSL.selGlow}
+${GLSL.simplex}
+${GLSL.land}
 
 #define MAXSTEPS 64
 #define MAXDIS   40.0
@@ -56,11 +66,10 @@ float sminK (float a, float b, float k, out float m) {
 
 // x = distance, y = material id (0..3, fractional where bubbles merge)
 vec2 map (vec3 p) {
-	vec4 s0 = uBubbles[0], s1 = uBubbles[1], s2 = uBubbles[2], s3 = uBubbles[3];
-	float d0 = length (p - s0.xyz) - s0.w;
-	float d1 = length (p - s1.xyz) - s1.w;
-	float d2 = length (p - s2.xyz) - s2.w;
-	float d3 = length (p - s3.xyz) - s3.w;
+	float d0 = shapeSdf (uShape, p, uBubbles[0], uSpin[0]);
+	float d1 = shapeSdf (uShape, p, uBubbles[1], uSpin[1]);
+	float d2 = shapeSdf (uShape, p, uBubbles[2], uSpin[2]);
+	float d3 = shapeSdf (uShape, p, uBubbles[3], uSpin[3]);
 	float h;
 	float d = sminK (d0, d1, SMOOTH_K, h);
 	float m = mix (1.0, 0.0, h);
@@ -103,11 +112,12 @@ vec2 march (vec3 ro, vec3 rd, float side) {
 }
 
 // one glass hit. returns the shaded colour, and leaves the reflection ray in
-// ro/rd plus the reflection weight in refl.
-vec3 shadeHit (inout vec3 ro, inout vec3 rd, out float refl, out bool hit) {
+// ro/rd plus the reflection weight in refl and the hit depth in tHit.
+vec3 shadeHit (inout vec3 ro, inout vec3 rd, out float refl, out bool hit, out float tHit) {
 	vec2 h = march (ro, rd, 1.0);
 	hit = h.x < MAXDIS;
 	refl = 0.0;
+	tHit = hit ? h.x : BIG;
 	if (!hit) return envSun (rd);
 
 	vec3 pos = ro + rd * h.x;
@@ -143,16 +153,17 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 	camera (fragCoord, ro, rd);
 	vec3 viewRo = ro, viewRd = rd;
 
-	float refl;
+	float refl, tHit, firstT;
 	bool hit;
-	vec3 col = shadeHit (ro, rd, refl, hit);
+	vec3 col = shadeHit (ro, rd, refl, hit, firstT);
 	float filt = refl;
 	for (int i = 0; i < BOUNCES; i++) {
 		if (!hit || filt < 0.02) break;
-		vec3 c = shadeHit (ro, rd, refl, hit);
+		vec3 c = shadeHit (ro, rd, refl, hit, tHit);
 		col += c * filt;
 		filt *= refl;
 	}
+	col = landOverlay (col, viewRo, viewRd, firstT);
 	col = cageOverlay (col, viewRo, viewRd);
 	col += selGlow (viewRo, viewRd);
 

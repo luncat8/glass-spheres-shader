@@ -2,13 +2,31 @@
 (function () {
 	if (typeof module === 'object' && module.exports) { module.exports = {}; return; }
 
-	let canvas, statusEl, metaEl, errEl, fpsEl, bar, buttonsHost, sceneHost, noteEl, paramsHost;
+	let canvas, statusEl, metaEl, errEl, fpsEl, bar, buttonsHost, noteEl, paramsHost;
 	let musicChk, musicWrap, camBtn, movBtn, aaBtn, copyBtn;
 	let runner;
 	let firstShader = null;
 	let pendingErr = '';
 	let lastFpsTick = 0;
-	let curScene = 'checker';   // the scene selector's state, shared by every shader
+
+	// The two axes next to the shader row. `cur` is the selector's state,
+	// shared by every shader (switching the shader keeps the scene and the
+	// shape). `reg` is the js/caps.js registry, bound at boot; `onChange` runs
+	// whenever `cur` changes, by a click on the row or by a fallback.
+	const AXES = {
+		scene: {
+			noun: 'scene', hostId: 'scene-buttons', cur: 'checker', reg: null, host: null,
+			noneTip: ' — pick one of the "own scene" or "shadertoy originals" shaders to use it',
+			// motion model changed: drop the selection, present the scene from its own view
+			onChange: (entry, meta) => { if (window.Cam) { window.Cam.attach(meta); window.Cam.frame(entry); } },
+		},
+		shape: {
+			noun: 'shape', hostId: 'shape-buttons', cur: 'sphere', reg: null, host: null,
+			noneTip: ' — no shader can draw it',
+			onChange: null,
+		},
+	};
+	const AXIS_LIST = [AXES.scene, AXES.shape];
 
 	function setErr(msg) {
 		errEl.textContent = msg || '';
@@ -34,30 +52,44 @@
 
 	// ------------------------------------------------- selector button state
 
+	// what picking shader `m` would force on the other selectors
+	function lackNote(m) {
+		let note = '';
+		for (let a = 0; a < AXIS_LIST.length; a++) {
+			const ax = AXIS_LIST[a];
+			if (ax.reg.supports(m, ax.cur)) continue;
+			note += ' — cannot draw the "' + ax.reg.get(ax.cur).label + '" ' + ax.noun +
+				'; picking it switches the ' + ax.noun + ' to "' + ax.reg.get(ax.reg.nativeOf(m)).label + '"';
+		}
+		return note;
+	}
+
+	function refreshAxis(ax, meta) {
+		const btns = ax.host.querySelectorAll('button[data-entry]');
+		for (let i = 0; i < btns.length; i++) {
+			const e = ax.reg.get(btns[i].dataset.entry);
+			const ok = ax.reg.supports(meta, e.id);
+			const fallback = ok ? null : ax.reg.nativeShader(e.id, window.SHADERS || []);
+			btns[i].classList.toggle('active', e.id === ax.cur);
+			btns[i].classList.toggle('alt', !ok && !!fallback);
+			btns[i].disabled = !ok && !fallback;
+			btns[i].title = e.hint +
+				(ok || !fallback ? '' : ' — the current shader cannot draw it; picking it switches the shader to ' + shaderName(fallback)) +
+				(!ok && !fallback ? ax.noneTip : '');
+		}
+	}
+
 	function refreshSelectors() {
 		const meta = runner && runner.current;
 		const btns = buttonsHost.querySelectorAll('button[data-id]');
 		for (let i = 0; i < btns.length; i++) {
 			const m = shaderById(btns[i].dataset.id);
-			const ok = window.Scenes.supports(m, curScene);
+			const note = lackNote(m);
 			btns[i].classList.toggle('active', !!meta && btns[i].dataset.id === meta.id);
-			btns[i].classList.toggle('alt', !ok);
-			btns[i].title = shortLabel(m) +
-				(ok ? '' : ' — cannot draw the "' + window.Scenes.get(curScene).label +
-					'" scene; picking it switches the scene to "' + window.Scenes.get(window.Scenes.nativeScene(m)).label + '"');
+			btns[i].classList.toggle('alt', note !== '');
+			btns[i].title = shortLabel(m) + note;
 		}
-		const sbtns = sceneHost.querySelectorAll('button[data-scene]');
-		for (let i = 0; i < sbtns.length; i++) {
-			const sc = window.Scenes.get(sbtns[i].dataset.scene);
-			const ok = window.Scenes.supports(meta, sc.id);
-			const fallback = ok ? null : window.Scenes.nativeShader(sc.id, window.SHADERS || []);
-			sbtns[i].classList.toggle('active', sc.id === curScene);
-			sbtns[i].classList.toggle('alt', !ok && !!fallback);
-			sbtns[i].disabled = !ok && !fallback;
-			sbtns[i].title = sc.hint +
-				(ok || !fallback ? '' : ' — the current shader cannot draw it; picking it switches the shader to ' + shaderName(fallback)) +
-				(!ok && !fallback ? ' — pick one of the "own scene" or "shadertoy originals" shaders to use it' : '');
-		}
+		for (let a = 0; a < AXIS_LIST.length; a++) refreshAxis(AXIS_LIST[a], meta);
 	}
 
 	// emoji() renders the primary glyph onto an offscreen canvas and inspects the
@@ -111,9 +143,7 @@
 	function isAdjustable(meta) {
 		if (!meta) return false;
 		const ps = meta.params || [];
-		for (let i = 0; i < ps.length; i++) {
-			if (ps[i].name !== 'uScene' && !ps[i].hidden) return true;
-		}
+		for (let i = 0; i < ps.length; i++) if (!ps[i].hidden) return true;
 		return false;
 	}
 
@@ -155,7 +185,7 @@
 	// shaders are grouped by how they relate to the scene selector, so the row
 	// itself explains which buttons are combinable with which scene
 	const GROUPS = [
-		{ id: 'scene', label: 'scene-aware:', hint: 'these renderers work with every scene in the row below' },
+		{ id: 'scene', label: 'scene-aware:', hint: 'these renderers work with every scene in the row below (the shapes each one can draw are in its tooltip)' },
 		{ id: 'own', label: 'own scene:', hint: 'cubemap/iMouse pipelines that bring their own background and motion' },
 		{ id: 'orig', label: 'shadertoy originals:', hint: 'unmodified ports; they bring their own background and motion' },
 	];
@@ -174,24 +204,31 @@
 		}
 	}
 
-	function renderScenes() {
-		sceneHost.textContent = '';
-		const scenes = window.Scenes.list;
-		for (let i = 0; i < scenes.length; i++) {
+	function renderAxis(ax) {
+		ax.host.textContent = '';
+		const list = ax.reg.list;
+		for (let i = 0; i < list.length; i++) {
 			const btn = document.createElement('button');
-			btn.dataset.scene = scenes[i].id;
-			btn.textContent = scenes[i].label;
-			btn.title = scenes[i].hint;
-			btn.addEventListener('click', () => pickScene(scenes[i].id));
-			sceneHost.appendChild(btn);
+			btn.dataset.entry = list[i].id;
+			btn.textContent = list[i].label;
+			btn.title = list[i].hint;
+			btn.addEventListener('click', () => pickEntry(ax, list[i].id));
+			ax.host.appendChild(btn);
 		}
+	}
+
+	// a param may restrict itself to some scenes (`scenes: [...]`, the cage
+	// sliders) or shapes (`shapes: [...]`); the axes' own hidden params never show
+	function paramVisible(p) {
+		for (let a = 0; a < AXIS_LIST.length; a++) {
+			if (!AXIS_LIST[a].reg.paramVisible(p, AXIS_LIST[a].cur)) return false;
+		}
+		return true;
 	}
 
 	// parameter strip generated from the current shader's `params` metadata.
 	// Sliders write straight into param.value; options params (p.options) render
-	// as a <select>. Params that only apply to some scenes (the cage sliders)
-	// are hidden in the others, and `uScene` never appears — the scene row owns
-	// it. runner.js uploads the values per frame.
+	// as a <select>. runner.js uploads the values per frame.
 	function buildParams(meta) {
 		paramsHost.textContent = '';
 		const ps = (meta && meta.params) || [];
@@ -199,7 +236,7 @@
 		for (let i = 0; i < ps.length; i++) {
 			const p = ps[i];
 			if (p.value === undefined) p.value = p.def;
-			if (!window.Scenes.paramVisible(p, curScene)) continue;
+			if (!paramVisible(p)) continue;
 			shown++;
 			const wrap = document.createElement('label');
 			wrap.className = 'param';
@@ -239,7 +276,7 @@
 		const hint = document.createElement('span');
 		hint.className = 'param-empty';
 		hint.textContent = (meta && meta.params && meta.params.length)
-			? 'no parameters for this shader in the "' + window.Scenes.get(curScene).label + '" scene'
+			? 'no parameters for this shader in the "' + AXES.scene.reg.get(AXES.scene.cur).label + '" scene'
 			: 'this shader has no parameters';
 		paramsHost.appendChild(hint);
 	}
@@ -332,27 +369,35 @@
 		return (step >= 1) ? String(v | 0) : v.toFixed(step >= 0.1 ? 1 : (step >= 0.01 ? 2 : 3));
 	}
 
-	// ------------------------------------------------------ the two selectors
+	// ---------------------------------------------------- the three selectors
 	//
-	// shader = HOW the bubbles are drawn, scene = WHERE they are drawn and HOW
-	// they move. They are independent: `curScene` is global, so switching the
-	// shader keeps the scene and switching the scene keeps the shader.
+	// shader = HOW the objects are drawn, scene = WHERE they are drawn and HOW
+	// they move, shape = WHAT they are. They are independent: the axes' `cur`
+	// is global, so switching the shader keeps the scene and the shape, and
+	// switching either of those keeps the shader.
 	//
-	// Not every pair exists. The selector the user just clicked always wins and
-	// the other one falls back to its native partner, with a note saying so.
+	// Not every combination exists. The selector the user just clicked always
+	// wins and the others fall back to their native partner, with a note
+	// saying so.
+
+	function setCur(ax, id, meta) {
+		ax.cur = id;
+		if (ax.onChange) ax.onChange(ax.reg.get(id), meta);
+	}
 
 	function pick(id, note) {
 		const meta = shaderById(id);
 		if (!meta) { setErr('unknown shader id: ' + id); return; }
 		let msg = note || '';
-		if (!window.Scenes.supports(meta, curScene)) {
-			const from = window.Scenes.get(curScene).label;
-			const next = window.Scenes.nativeScene(meta);
-			curScene = next;
-			msg = meta.id + ' cannot draw the "' + from + '" scene — scene switched to "' +
-				window.Scenes.get(next).label + '"';
+		for (let a = 0; a < AXIS_LIST.length; a++) {
+			const ax = AXIS_LIST[a];
+			if (ax.reg.supports(meta, ax.cur)) continue;
+			const from = ax.reg.get(ax.cur).label;
+			setCur(ax, ax.reg.nativeOf(meta), meta);
+			msg += (msg ? '; ' : '') + meta.id + ' cannot draw the "' + from + '" ' + ax.noun +
+				' — ' + ax.noun + ' switched to "' + ax.reg.get(ax.cur).label + '"';
 		}
-		window.Scenes.apply(meta, curScene);
+		for (let a = 0; a < AXIS_LIST.length; a++) AXIS_LIST[a].reg.apply(meta, AXIS_LIST[a].cur);
 		try {
 			runner.select(id);
 			if (window.Cam) window.Cam.attach(meta);
@@ -381,31 +426,34 @@
 		}
 	}
 
-	// Switching the scene never recompiles: the shader already declares the
-	// hidden `uScene` uniform and its sphere feed is scene-aware, so only the
-	// param value, the visible sliders and the selection need refreshing.
-	function pickScene(sceneId) {
+	// Switching the scene or the shape never recompiles: the shader already
+	// declares the hidden `uScene` / `uShape` uniforms and its feeds are
+	// scene-aware, so only the param value, the visible sliders and the
+	// selection need refreshing.
+	function pickEntry(ax, id) {
 		const meta = runner && runner.current;
 		if (!meta) return;
-		const sc = window.Scenes.get(sceneId);
-		if (!window.Scenes.supports(meta, sceneId)) {
-			const next = window.Scenes.nativeShader(sceneId, window.SHADERS || []);
+		const e = ax.reg.get(id);
+		if (!ax.reg.supports(meta, id)) {
+			const next = ax.reg.nativeShader(id, window.SHADERS || []);
 			if (!next) {
-				setNote('"' + sc.label + '" is not a shared scene — pick a shader from the "own scene" or "shadertoy originals" group');
+				setNote('"' + e.label + '" is not a shared ' + ax.noun + ax.noneTip);
 				return;
 			}
-			curScene = sceneId;
-			pick(next, 'scene "' + sc.label + '" needs another renderer — shader switched to ' + shaderName(next));
+			setCur(ax, id, meta);
+			pick(next, ax.noun + ' "' + e.label + '" needs another renderer — shader switched to ' + shaderName(next));
 			return;
 		}
-		if (curScene === sceneId) return;
-		curScene = sceneId;
-		window.Scenes.apply(meta, curScene);
-		if (window.Cam) window.Cam.attach(meta); // motion model changed: drop the selection
+		if (ax.cur === id) return;
+		setCur(ax, id, meta);
+		ax.reg.apply(meta, id);
 		buildParams(meta);
 		refreshSelectors();
 		setNote('');
 	}
+
+	function pickScene(sceneId) { pickEntry(AXES.scene, sceneId); }
+	function pickShape(shapeId) { pickEntry(AXES.shape, shapeId); }
 
 	function tick() {
 		const now = performance.now();
@@ -427,7 +475,9 @@
 		fpsEl = document.getElementById('fps');
 		bar = document.getElementById('bar');
 		buttonsHost = document.getElementById('shader-buttons');
-		sceneHost = document.getElementById('scene-buttons');
+		AXES.scene.reg = window.Scenes;
+		AXES.shape.reg = window.Shapes;
+		for (let a = 0; a < AXIS_LIST.length; a++) AXIS_LIST[a].host = document.getElementById(AXIS_LIST[a].hostId);
 		noteEl = document.getElementById('combo-note');
 		paramsHost = document.getElementById('params');
 		musicChk = document.getElementById('music');
@@ -444,9 +494,9 @@
 			return;
 		}
 		renderButtons(list);
-		renderScenes();
+		for (let a = 0; a < AXIS_LIST.length; a++) renderAxis(AXIS_LIST[a]);
 		firstShader = (list.filter((s) => (s.group || 'orig') === 'scene')[0] || list[0]).id;
-		curScene = window.Scenes.nativeScene(shaderById(firstShader));
+		for (let a = 0; a < AXIS_LIST.length; a++) AXIS_LIST[a].cur = AXIS_LIST[a].reg.nativeOf(shaderById(firstShader));
 		try {
 			runner = window.Runner.init(canvas);
 		} catch (e) {
@@ -486,10 +536,15 @@
 		window.__app = {
 			pick,
 			pickScene,
-			scene: () => curScene,
+			pickShape,
+			scene: () => AXES.scene.cur,
 			scenes: () => window.Scenes.list.map((s) => s.id),
 			setScene: pickScene,
 			sceneOf: (id) => window.Scenes.supported(shaderById(id)),
+			shape: () => AXES.shape.cur,
+			shapes: () => window.Shapes.list.map((s) => s.id),
+			setShape: pickShape,
+			shapeOf: (id) => window.Shapes.supported(shaderById(id)),
 			stats: () => runner.stats(),
 			list: () => (window.SHADERS || []).map((s) => s.id),
 			current: () => runner.current && runner.current.id,

@@ -1,23 +1,35 @@
 // Multi-bubble variant of ld3SDl (thin-film interference).
-// Replaces single warped sphere SDF with smooth-min union of N animated spheres.
-// Single-pass raymarch + thin-film color, same channels as the original.
-// No external libs.
+// Replaces single warped sphere SDF with smooth-min union of N animated objects
+// (any shape via GLSL.shape; the centres stay GLSL-animated, the spins come
+// from the shared feed). Single-pass raymarch + thin-film color, same channels
+// as the original. No external libs.
 // --- iq's fancy cube lookup (2D-cube projection) ---
 // --- iq's 3D value noise ---
 // --- smooth-min (iq), k controls the blend radius ---
 // --- animated bubble centers; radii chosen so the bubbles overlap ---
-// --- multi-bubble SDF: smooth-min of N spheres + warp ---
+// --- multi-bubble SDF: smooth-min of N objects + warp ---
 window.SHADER_multi_thinfilm = {
   "id": "multi_thinfilm",
   "title": "multi-bubble thin-film interference (3 bubbles, smooth-min)",
   "scenes": ["own"],
+  "shapes": ["sphere", "cube", "tetra", "knot"],
+  "nativeShape": "sphere",
   "group": "own",
   "channels": {"0":"env_cube","1":"thickness","2":"noise","3":"noise"},
+  "arrays": [
+    { "name": "uSpin", "type": "vec4", "count": 3, "feed": "spin" }
+  ],
+  "params": [
+    { "name": "uShape", "type": "int", "def": 0, "hidden": true }
+  ],
   "source":
-`/*
+`${GLSL.raySphere}
+${GLSL.shape}
+
+/*
 	Multi-Bubble Fast Thin-Film Interference
 	Same optical model as ld3SDl, but the SDF is a smooth-min union of
-	three animated spheres, so multiple soap bubbles overlap and merge
+	three animated objects, so multiple soap bubbles overlap and merge
 	with realistic surface continuity.
 */
 
@@ -80,9 +92,9 @@ float sdf (vec3 p) {
 	vec3 n = vec3 (sin (iDate.w * 0.5), sin (iDate.w * 0.3), cos (iDate.w * 0.2));
 	vec3 q = 0.1 * (noise3 (p + n) - 0.5);
 	vec3 pp = q + p;
-	float d0 = length (pp - bubblePos (0, iTime)) - 1.6;
-	float d1 = length (pp - bubblePos (1, iTime)) - 1.3;
-	float d2 = length (pp - bubblePos (2, iTime)) - 1.3;
+	float d0 = shapeSdf (uShape, pp, vec4 (bubblePos (0, iTime), 1.6), uSpin[0]);
+	float d1 = shapeSdf (uShape, pp, vec4 (bubblePos (1, iTime), 1.3), uSpin[1]);
+	float d2 = shapeSdf (uShape, pp, vec4 (bubblePos (2, iTime), 1.3), uSpin[2]);
 	// k=0.6 gives a soft merge between adjacent bubbles
 	float d = smin (d0, d1, 0.6);
 	d = smin (d, d2, 0.6);

@@ -13,6 +13,12 @@
 	const Feeds = {};
 
 	const GA = 2.399963229728653; // golden angle
+	const TAU = Math.PI * 2.0;
+	const LISSAJOUS_NORM = Math.sqrt(1.0 + 1.0 + 0.81);
+
+	// terrain scene: objects float in a band this tall, this far above the
+	// highest possible ridge (see liftAboveLand)
+	const LAND_GAP = 0.3, LAND_BAND = 2.5;
 
 	// deterministic per-index constants, computed once. Each bubble has:
 	//   * orbR / orbS — orbital radius and a primary speed
@@ -72,8 +78,17 @@
 			radJit[i] = 0.08 + 0.07 * ((i * 7 + 1) % 5) / 5;   // breathing depth
 			yOff[i] = Math.sin(GA * i * 1.3) * 1.7 * vspread;
 		}
+		// per-axis motion bounds (before uSpread): the tilted Lissajous point
+		// has length <= orbR * |(1, 1, 0.9)|, plus the drift and the y offset
+		let orbMax = 0, yOffMax = 0;
+		for (let i = 0; i < n; i++) {
+			orbMax = Math.max(orbMax, orbR[i]);
+			yOffMax = Math.max(yOffMax, Math.abs(yOff[i]));
+		}
+		const extXZ = orbMax * LISSAJOUS_NORM + 0.55;
+		const extY = orbMax * LISSAJOUS_NORM + 0.40 + yOffMax;
 		return { orbR, orbS, fxA, fxB, fxC, phA, phB, phC,
-			axYaw, axPch, axRol, driftA, driftB, driftC, driftPh, rad, radJit, yOff };
+			axYaw, axPch, axRol, driftA, driftB, driftC, driftPh, rad, radJit, yOff, extXZ, extY };
 	}
 	const C32 = makeCloud(32);
 	const C61 = makeCloud(61);
@@ -200,19 +215,22 @@
 		}
 	}
 
-	// Scene-aware sphere feeds. The scene selector owns the *behaviour* of the
-	// spheres, so one feed serves both motion models: the drifting cloud in
-	// scenes 0..2, and the elastic AABB bounce in the cage scene (3). Shaders
-	// therefore never have to be rebuilt when the scene changes — only the
-	// uScene uniform and the values written into their existing array buffer.
-	Feeds.bubbles = function (time, meta, out) {
-		if (paramVal(meta, 'uScene', 0) === 3) { feedCageInside(time, meta, out); return; }
-		feedCloud(C32, time, meta, out);
-	};
-	Feeds.bubbles61 = function (time, meta, out) {
-		if (paramVal(meta, 'uScene', 0) === 3) { feedCageInside(time, meta, out); return; }
-		feedCloud(C61, time, meta, out);
-	};
+	// Scene-aware object feeds. The scene selector owns the *behaviour* of the
+	// objects, so one feed serves every motion model: the drifting cloud in
+	// scenes 0..2, the elastic AABB bounce in the cage scene (3) and the cloud
+	// lifted above the terrain (4). Shaders therefore never have to be rebuilt
+	// when the scene changes — only the uScene uniform and the values written
+	// into their existing array buffer.
+	function feedSceneCloud(c, time, meta, out) {
+		const scene = paramVal(meta, 'uScene', 0);
+		if (scene === 3) { feedCageInside(time, meta, out); return; }
+		feedCloud(c, time, meta, out);
+		if (scene !== 4) return;
+		const spread = paramVal(meta, 'uSpread', 1.0);
+		liftAboveLand(out, Math.min(c.orbR.length, out.length >> 2), meta, c.extXZ * spread, c.extY * spread);
+	}
+	Feeds.bubbles = function (time, meta, out) { feedSceneCloud(C32, time, meta, out); };
+	Feeds.bubbles61 = function (time, meta, out) { feedSceneCloud(C61, time, meta, out); };
 	Feeds.bubbles64 = function (time, meta, out) { feedCloud(C64, time, meta, out); };
 	Feeds.bubbles128 = function (time, meta, out) { feedCloud(C128, time, meta, out); };
 
@@ -243,11 +261,68 @@
 
 	Feeds.cageInside = feedCageInside;
 
+	// Terrain scene: an affine remap of the motion already written into `out`
+	// (per-axis bounds extXZ / extY, including uSpread). x/z shrink into the
+	// land footprint, y moves into a band above the highest possible ridge
+	// (uLandBase + uLandAmp, because |fbm3| <= 1 in GLSL.simplex) - the same
+	// conservative-bound trick as the cage, so no JS copy of the noise is
+	// needed and no slider setting can push an object into the terrain.
+	function liftAboveLand(out, n, meta, extXZ, extY) {
+		const land = paramVal(meta, 'uLandSize', 5.0);
+		const ridge = paramVal(meta, 'uLandBase', 0.0) + paramVal(meta, 'uLandAmp', 1.1);
+		for (let i = 0; i < n; i++) {
+			const j = i * 4;
+			const w = out[j + 3];
+			const k = Math.max(land - w, 0.0) / extXZ;
+			out[j] *= k;
+			out[j + 2] *= k;
+			out[j + 1] = ridge + w + LAND_GAP + (out[j + 1] / extY + 1.0) * 0.5 * LAND_BAND;
+		}
+	}
+
+	// Per-object tumble: vec4 (unit axis, angle). Axis, rate and phase are
+	// deterministic per index; the angle is already advanced by `time` (and
+	// wrapped, so GLSL's sin/cos never see a huge argument), so the shader and
+	// the click picker read the very same orientation from this buffer.
+	const SPIN_MAX = 128;
+	const SPIN_AX = new Float32Array(SPIN_MAX);
+	const SPIN_AY = new Float32Array(SPIN_MAX);
+	const SPIN_AZ = new Float32Array(SPIN_MAX);
+	const SPIN_RATE = new Float32Array(SPIN_MAX);
+	const SPIN_PHASE = new Float32Array(SPIN_MAX);
+	for (let i = 0; i < SPIN_MAX; i++) {
+		const k = i + 1;
+		const az = TAU * hash01(k * 3.71);
+		const dz = hash01(k * 5.13) * 2.0 - 1.0;
+		const flat = Math.sqrt(Math.max(0.0, 1.0 - dz * dz));
+		SPIN_AX[i] = Math.cos(az) * flat;
+		SPIN_AY[i] = dz;
+		SPIN_AZ[i] = Math.sin(az) * flat;
+		SPIN_RATE[i] = (0.25 + 0.45 * hash01(k * 9.29)) * ((i & 1) ? -1.0 : 1.0);
+		SPIN_PHASE[i] = TAU * hash01(k * 13.7);
+	}
+
+	Feeds.spin = function (time, meta, out) {
+		const n = Math.min(SPIN_MAX, out.length >> 2);
+		for (let i = 0; i < n; i++) {
+			const j = i * 4;
+			const a = SPIN_PHASE[i] + SPIN_RATE[i] * time;
+			out[j] = SPIN_AX[i];
+			out[j + 1] = SPIN_AY[i];
+			out[j + 2] = SPIN_AZ[i];
+			out[j + 3] = a - Math.floor(a / TAU) * TAU;
+		}
+	};
+
 	// Four-sphere material renderers use this feed in place of their old GLSL
 	// animation. It preserves that animation in normal scenes, but switches to
 	// the same reflected AABB trajectories when the cage scene is selected.
+	// per-axis bounds of that animation before uSpread (see liftAboveLand)
+	const FOUR_EXT_XZ = 2.3, FOUR_EXT_Y = 1.3;
+
 	Feeds.sceneBubbles4 = function (time, meta, out) {
-		if (paramVal(meta, 'uScene', 0) === 3) { feedCageInside(time, meta, out); return; }
+		const scene = paramVal(meta, 'uScene', 0);
+		if (scene === 3) { feedCageInside(time, meta, out); return; }
 		const s = paramVal(meta, 'uSpread', 1.0);
 		out[0] = s * 0.4 * Math.sin(time * 0.50);
 		out[1] = s * 0.6 * Math.sin(time * 0.90);
@@ -261,6 +336,7 @@
 		out[12] = s * 0.4 * Math.sin(time * 0.30);
 		out[13] = s * 1.3 * Math.cos(time * 0.40);
 		out[14] = s * 1.2; out[15] = 0.9;
+		if (scene === 4) liftAboveLand(out, 4, meta, FOUR_EXT_XZ * s, FOUR_EXT_Y * s);
 	};
 
 	// The outer balls have zero initial horizontal velocity. With no friction

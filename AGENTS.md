@@ -33,22 +33,34 @@ guidance for LLM agents
 
 ## concepts
 
-	two orthogonal selectors, both global, both in the toolbar:
+	three orthogonal selectors, all global, all in the toolbar:
 
-		shader — HOW the bubbles are drawn (one shaders/*.js each).
+		shader — HOW the objects are drawn (one shaders/*.js each).
 		scene  — WHERE they are drawn (interior / land / background)
-		         and HOW they move (drift, or bounce inside the cage).
+		         and HOW they move (drift, bounce inside the cage,
+		         float above the glass land).
+		shape  — WHAT every object is (sphere, cube, tetra, knot).
 
 	a shader declares what it can render:
-		scenes: ['checker','rainbow','colorbox','cage']   + nativeScene
+		scenes: ['checker','rainbow','colorbox','cage','terrain'] + nativeScene
 		scenes: ['own']   -> brings its own background and motion
-	the registry and the fallback rules live in js/scenes.js.
+		shapes: ['sphere','cube','tetra','knot']                  + nativeShape
+		(no shapes -> sphere only)
+	the fallback rules live in js/caps.js; js/scenes.js and
+	js/shapes.js are the registries. shapes are analytic formulas
+	inscribed in the object's bounding ball (GLSL.shape), never meshes;
+	the per-object spin is a feed (Feeds.spin), shared by the shader
+	and the click picker.
 
 	when a combination does not exist, the selector the user just
-	clicked wins and the other one falls back to its native partner.
+	clicked wins and the others fall back to their native partner.
 	never silently ignore the click.
 
-	a param may declare scenes: [...] to hide itself in other scenes.
-	uScene is hidden: the scene row owns it.
+	a param may declare scenes: [...] / shapes: [...] to hide itself
+	elsewhere. uScene and uShape are hidden: their rows own them.
+
+	shared world geometry (cage wires, land block) lives in glsl_lib.js
+	blocks that are no-ops outside their scene and are composed at their
+	measured depth against the renderer's nearest object.
 
 
