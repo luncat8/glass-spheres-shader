@@ -532,7 +532,7 @@ void main() {
 		if (Runner.mov) Runner.sceneTime += dt;
 
 		// orbit camera: advance auto-motion, refresh basis and feeds
-		if (root.Cam && root.Cam.tick) root.Cam.tick(dt, elapsed);
+		if (root.Cam && root.Cam.tick) root.Cam.tick(dt);
 
 		const wh = resize(Runner.canvas);
 		gl.viewport(0, 0, wh[0], wh[1]);

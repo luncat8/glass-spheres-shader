@@ -42,7 +42,7 @@
 			const ok = window.Scenes.supports(m, curScene);
 			btns[i].classList.toggle('active', !!meta && btns[i].dataset.id === meta.id);
 			btns[i].classList.toggle('alt', !ok);
-			btns[i].title = (m && (m.title || m.id)) +
+			btns[i].title = shortLabel(m) +
 				(ok ? '' : ' — cannot draw the "' + window.Scenes.get(curScene).label +
 					'" scene; picking it switches the scene to "' + window.Scenes.get(window.Scenes.nativeScene(m)).label + '"');
 		}
@@ -60,13 +60,73 @@
 		}
 	}
 
+	// emoji() renders the primary glyph onto an offscreen canvas and inspects the
+	// pixels: a glyph the system can't draw comes back blank (flat alpha), so we
+	// fall back to the ASCII/unicode-safe twin. The probe runs once per pair and
+	// is cached for the rest of the session — it is called from the hot
+	// shortLabel() path, so caching matters.
+	const emojiCache = Object.create(null);
+
+	function emoji(primary, fallback) {
+		const key = primary + '\u0000' + fallback;
+		if (emojiCache[key] !== undefined) return emojiCache[key];
+		emojiCache[key] = fallback; // pessimistic default before the probe runs
+		if (typeof document === 'undefined') return fallback;
+
+		const canvas = document.createElement('canvas');
+		const ctx = canvas.getContext('2d');
+		if (!ctx) return fallback;
+
+		canvas.width = 50;
+		canvas.height = 50;
+		ctx.font = '40px sans-serif';
+		ctx.textBaseline = 'top';
+		ctx.clearRect(0, 0, canvas.width, canvas.height);
+		ctx.fillText(primary, 0, 0);
+
+		const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+		for (let i = 0; i < data.length; i += 4) {
+			if (data[i + 3] > 0 && (data[i] !== data[i + 1] || data[i + 1] !== data[i + 2])) {
+				emojiCache[key] = primary;
+				return primary;
+			}
+		}
+		return fallback;
+	}
+
+	function bubbleCount(meta) {
+		if (!meta) return 1;
+		const ps = meta.params || [];
+		for (let i = 0; i < ps.length; i++) {
+			if (ps[i].name === 'uCount' && ps[i].max) return ps[i].max;
+		}
+		const arr = meta.arrays || [];
+		for (let i = 0; i < arr.length; i++) {
+			if (arr[i].name === 'uBubbles' && arr[i].count) return arr[i].count;
+		}
+		const m = (meta.title || '').match(/\((\d+)\s*(?:sphere|bubble)/i);
+		return m ? parseInt(m[1]) : 1;
+	}
+
+	function isAdjustable(meta) {
+		if (!meta) return false;
+		const ps = meta.params || [];
+		for (let i = 0; i < ps.length; i++) {
+			if (ps[i].name !== 'uScene' && !ps[i].hidden) return true;
+		}
+		return false;
+	}
+
 	function shortLabel(meta) {
 		const id = meta.id;
 		const t = meta.title || id;
-		// strip leading "<ID> - " prefix
 		const dash = t.indexOf(' - ');
-		const tail = dash >= 0 ? t.slice(dash + 3) : t;
-		return id + ' (' + tail + ')';
+		let tail = dash >= 0 ? t.slice(dash + 3) : t;
+		tail = tail.split(',')[0].trim();
+		tail = tail.replace(/\([^)]*\)/g, '').trim();
+		const count = bubbleCount(meta);
+		const adj = isAdjustable(meta);
+		return id + ', ' + tail + ', ' + emoji('🪩', '💿') + ' ' + count + (adj ? ', adj' : '');
 	}
 
 	function buildButton(meta) {
@@ -76,7 +136,7 @@
 		const btn = document.createElement('button');
 		btn.dataset.id = meta.id;
 		btn.textContent = shortLabel(meta);
-		btn.title = meta.title || meta.id;
+		btn.title = shortLabel(meta);
 		item.appendChild(btn);
 
 		if (meta.url) {
@@ -201,7 +261,17 @@
 		window.AudioM.setEnabled(true);
 	}
 
+	// the cam button belongs to the shared orbit camera only; a shader that
+	// drives its own GLSL camera from iMouse gets a disabled button that says
+	// so, instead of a click that silently does nothing
+	const CAM_TIP_OWN = 'this shader orbits from iMouse inside its own GLSL camera — ' +
+		'the shared orbit camera (drag, wheel, pinch, auto-orbit, click-to-select) does not apply';
+	let camTipShared = '';
+
 	function updateCam() {
+		const shared = !!window.Cam && window.Cam.shared();
+		camBtn.disabled = !shared;
+		camBtn.title = shared ? camTipShared : CAM_TIP_OWN;
 		camBtn.textContent = window.Cam ? window.Cam.label() : 'cam';
 	}
 	function updateMov() {
@@ -363,6 +433,7 @@
 		musicChk = document.getElementById('music');
 		musicWrap = document.getElementById('music-wrap');
 		camBtn = document.getElementById('cam');
+		camTipShared = camBtn.title;
 		movBtn = document.getElementById('mov');
 		aaBtn = document.getElementById('aa');
 		copyBtn = document.getElementById('copy-prompt');

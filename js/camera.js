@@ -6,6 +6,16 @@
 // every frame through the feeds registered below (camPos / camRt / camUp /
 // camFw / camSel); shaders declare matching `vars` in their metadata.
 //
+// Only shaders that declare `uCamPos` in `vars` consume that basis, and only
+// they are orbited, zoomed, picked and auto-spun (see sharedCam()). Shaders
+// that drive their own GLSL camera from iMouse — the Shadertoy ports and the
+// own-scene variants — just get their iMouse forwarded and are left alone.
+//
+// Drag is viewport-relative and follows the cursor ("grab the scene"): both
+// axes are normalised by min(clientWidth, clientHeight), so the same physical
+// drag turns the camera the same amount at any window size, aspect ratio and
+// devicePixelRatio, and a diagonal drag rotates as much as either axis alone.
+//
 // auto mode (Cam.mode):
 //   0 = "auto" — orbit until the user moves the camera manually, then off
 //   1 = "on"   — always orbit, manual drag just steers it
@@ -13,21 +23,26 @@
 (function (root) {
 	if (typeof module === 'object' && module.exports) { module.exports = {}; return; }
 
+	const MIN_DIST = 2.2, MAX_DIST = 40.0, PITCH_MAX = 1.45;
+	const AUTO_SPEED = 0.15, AUTO_PITCH = 0.15;
+	const TAN30 = Math.tan(Math.PI / 6.0); // FOV 60, matches `FOV` in glsl_lib
+
+	// one min-dimension of drag = 180° of turn (header explains the min choice)
+	const ORBIT_TURN = Math.PI;
+	// click-vs-drag threshold: a fixed pixel count is hair-trigger on 4K and
+	// too coarse on a phone, so it scales with the same reference dimension.
+	const CLICK_MIN = 6.0, CLICK_FRAC = 0.01;
+
 	const Cam = {
 		mode: 0, // see header; 0 = auto-until-first-manual-move (the default)
 		yaw: 0.0,
-		pitch: 0.15,
+		pitch: AUTO_PITCH,
 		dist: 7.5,
 		target: [0, 0, 0],
 		sel: [0, 0, 0, 0],   // selected bubble centre + radius (w = 0 => none)
 		selSrc: null,       // { kind: <array feed name>, idx } or null
 		onModeChange: null, // ui hook to refresh the camera button label
 	};
-
-	const TAU = 2.0 * Math.PI;
-	const MIN_DIST = 2.2, MAX_DIST = 40.0, PITCH_MAX = 1.45;
-	const AUTO_SPEED = 0.15, CLICK_DRAG = 6.0;
-	const TAN30 = Math.tan(Math.PI / 6.0); // FOV 60, matches `FOV` in glsl_lib
 
 	// preallocated scratch (AGENTS.md: no allocations in per-frame hot paths)
 	const fw = [0, 0, 0], rt = [0, 0, 0], up = [0, 0, 0], pos = [0, 0, 0];
@@ -38,11 +53,42 @@
 	let canvas = null, runner = null;
 	let pointers = [];      // active pointer { id, x, y }
 	let pinchDist = 0;
-	let downX = 0, downY = 0, dragDist = 0, dragging = false;
+	let dragDist = 0, dragging = false;
+
+	// The orbit camera only drives shaders that consume its feeds, and those
+	// declare `uCamPos` in `vars` — the same contract the runner uses to upload
+	// the basis, so it cannot drift from what the GLSL actually reads. Legacy
+	// Shadertoy ports and own-scene shaders orbit inside GLSL from `iMouse`, so
+	// for them this module is an input forwarder: no orbit, no zoom, no pick,
+	// no auto-spin. Memoised on the meta identity (pointer compare per event).
+	let sharedMeta, sharedFlag = false;
+
+	function declaresCamPos(meta) {
+		const vs = (meta && meta.vars) || [];
+		for (let i = 0; i < vs.length; i++) if (vs[i].name === 'uCamPos') return true;
+		return false;
+	}
+
+	function sharedCam() {
+		const meta = runner ? runner.current : undefined;
+		if (meta !== sharedMeta) { sharedMeta = meta; sharedFlag = declaresCamPos(meta); }
+		return sharedFlag;
+	}
+
+	// reference dimension for every viewport-relative quantity: 0 when the
+	// canvas is hidden or not laid out yet, which makes the guards fall out
+	function viewDim() {
+		if (!canvas) return 0;
+		const w = canvas.clientWidth, h = canvas.clientHeight;
+		return (w > 0 && h > 0) ? (w < h ? w : h) : 0;
+	}
+
+	function clickDrag(dim) { return dim * CLICK_FRAC > CLICK_MIN ? dim * CLICK_FRAC : CLICK_MIN; }
 
 	function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 	function modeLabel() {
+		if (!sharedCam()) return 'cam: n/a';
 		return Cam.mode === 1 ? 'cam: on' : Cam.mode === 2 ? 'cam: off' : 'cam: auto';
 	}
 
@@ -172,10 +218,11 @@
 	}
 
 	// called by runner.frame() every rendered frame
-	function tick(dt, elapsed) {
+	function tick(dt) {
+		if (!sharedCam()) return;
 		if (Cam.mode !== 2) {
 			Cam.yaw += AUTO_SPEED * dt;
-			Cam.pitch += (0.15 - Cam.pitch) * Math.min(1.0, dt * 0.5);
+			Cam.pitch += (AUTO_PITCH - Cam.pitch) * Math.min(1.0, dt * 0.5);
 		}
 		updateSelPos();
 		basis();
@@ -183,20 +230,20 @@
 
 	// click pick: ray-cast the same spheres the shader draws. Select the
 	// nearest bubble under the cursor, or deselect when the click misses.
-	function pick(cssX, cssY) {
+	// x/y are canvas-relative CSS pixels (PointerEvent offsetX/offsetY).
+	function pick(x, y) {
 		const meta = runner && runner.current;
-		if (!canvas || !meta) return;
+		if (!canvas || !meta || !sharedCam()) return;
 		const p = pickable(meta, (runner.sceneTime !== undefined) ? runner.sceneTime : (runner.elapsed || 0));
 		if (!p) { clearSel(); return; }
 
+		const w = canvas.clientWidth, h = canvas.clientHeight;
+		if (!(w > 0 && h > 0)) return;
 		basis();
-		const r = canvas.getBoundingClientRect();
-		const rx = (cssX - r.left) / r.width;
-		const ry = (cssY - r.top) / r.height;
-		const minDim = Math.min(r.width, r.height);
-		const ux = (2.0 * rx - 1.0) * (r.width / minDim) * TAN30;
+		const minDim = w < h ? w : h;
+		const ux = (2.0 * (x / w) - 1.0) * (w / minDim) * TAN30;
 		// CSS pointer y grows downward; gl_FragCoord/camera UV y grows upward.
-		const uy = (1.0 - 2.0 * ry) * (r.height / minDim) * TAN30;
+		const uy = (1.0 - 2.0 * (y / h)) * (h / minDim) * TAN30;
 		ray[0] = ux * rt[0] + uy * up[0] + fw[0];
 		ray[1] = ux * rt[1] + uy * up[1] + fw[1];
 		ray[2] = ux * rt[2] + uy * up[2] + fw[2];
@@ -246,38 +293,33 @@
 			try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* ok */ }
 		}
 		pointers.push({ id: e.pointerId, x: e.clientX, y: e.clientY });
-		if (pointers.length === 1) {
-			downX = e.clientX; downY = e.clientY;
-			dragDist = 0; dragging = false;
-		}
+		if (pointers.length === 1) { dragDist = 0; dragging = false; }
 		if (pointers.length === 2) {
 			const a = pointers[0], b = pointers[1];
 			pinchDist = Math.hypot(a.x - b.x, a.y - b.y) || 0;
 		}
 	}
 
+	// the legacy GLSL cameras (XdXXzB, thick_glass, ...) orbit from iMouse, so
+	// this stays unconditional and keeps working on touch
+	function forwardIMouse(e) {
+		if (!runner || !runner.mouse || !canvas) return;
+		const w = canvas.clientWidth, h = canvas.clientHeight;
+		if (!(w > 0 && h > 0)) return;
+		runner.mouse[0] = e.offsetX * (canvas.width / w);
+		runner.mouse[1] = e.offsetY * (canvas.height / h);
+	}
+
 	function onMove(e) {
-		// keep the legacy iMouse camera (XdXXzB, thick_glass, ...) alive on touch
-		if (runner && runner.mouse && canvas) {
-			const r = canvas.getBoundingClientRect();
-			runner.mouse[0] = (e.clientX - r.left) * (canvas.width / r.width);
-			runner.mouse[1] = (e.clientY - r.top) * (canvas.height / r.height);
-		}
+		forwardIMouse(e);
 		const i = ptrIndex(e.pointerId);
 		if (i < 0) return;
 		const p = pointers[i];
 		const dx = e.clientX - p.x, dy = e.clientY - p.y;
 		p.x = e.clientX; p.y = e.clientY;
+		if (!sharedCam()) return;
 
-		if (pointers.length === 1) {
-			dragDist += Math.hypot(dx, dy);
-			if (!dragging && dragDist > CLICK_DRAG) dragging = true;
-			if (dragging) {
-				manual();
-				Cam.yaw -= dx * 0.006;
-				Cam.pitch = clamp(Cam.pitch - dy * 0.005, -PITCH_MAX, PITCH_MAX);
-			}
-		} else if (pointers.length === 2) {
+		if (pointers.length === 2) {
 			const a = pointers[0], b = pointers[1];
 			const d = Math.hypot(a.x - b.x, a.y - b.y);
 			if (pinchDist > 0 && d > 0) {
@@ -285,7 +327,20 @@
 				Cam.dist = clamp(Cam.dist * (pinchDist / d), MIN_DIST, MAX_DIST);
 			}
 			pinchDist = d;
+			return;
 		}
+		if (pointers.length !== 1) return;
+
+		dragDist += Math.hypot(dx, dy);
+		const dim = viewDim();
+		if (dim <= 0) return;
+		if (!dragging && dragDist > clickDrag(dim)) dragging = true;
+		if (!dragging) return;
+		manual();
+		// grab: drag right orbits the eye towards -x, so the scene follows the
+		// cursor; drag down raises the eye, so the scene travels down
+		Cam.yaw += (dx / dim) * ORBIT_TURN;
+		Cam.pitch = clamp(Cam.pitch - (dy / dim) * ORBIT_TURN, -PITCH_MAX, PITCH_MAX);
 	}
 
 	function onUp(e) {
@@ -295,11 +350,12 @@
 		pointers.splice(i, 1);
 		pinchDist = 0;
 		dragging = false;
-		if (pointers.length === 0 && !wasDrag) pick(e.clientX, e.clientY);
+		if (pointers.length === 0 && !wasDrag) pick(e.offsetX, e.offsetY);
 	}
 
 	function onWheel(e) {
-		e.preventDefault();
+		e.preventDefault(); // never let the wheel scroll the page behind the stage
+		if (!sharedCam()) return;
 		manual();
 		Cam.dist = clamp(Cam.dist * Math.exp(e.deltaY * 0.0012), MIN_DIST, MAX_DIST);
 	}
@@ -337,6 +393,7 @@
 
 	root.Cam = {
 		init, attach, tick, pick,
+		shared: sharedCam, // does the selected shader consume the shared basis?
 		cycleMode: function () { setMode((Cam.mode + 1) % 3); },
 		label: modeLabel,
 		get mode() { return Cam.mode; },

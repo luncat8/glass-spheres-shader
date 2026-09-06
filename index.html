@@ -23,6 +23,8 @@
 	#bar button:disabled:hover { background: #2a2a2a; }
 	#bar button:hover { background: #3a3a3a; }
 	#bar #cam { color: #9c9; }
+	/* two ids beat `#bar button:disabled`, so the disabled cam needs its own rule */
+	#bar #cam:disabled { color: #4a4a4a; }
 	#bar #aa { color: #9c9; }
 	#bar #music-wrap { display: inline-flex; align-items: center; gap: 5px; color: #999; cursor: pointer; }
 	#bar #music-wrap.off { color: #555; cursor: default; }
@@ -76,17 +78,17 @@
 <div id="app">
 	<div id="bar">
 		<div class="row">
-			<strong title="how the bubbles are drawn: the tracing / shading technique">shader <small>· how it draws</small></strong>
+			<strong title="how bubbles are drawn: tracing / shading technique">shader <small>· how it draws - 💿 balls number - adjustable</small></strong>
 			<span id="shader-buttons"></span>
 		</div>
 		<div class="row">
-			<strong title="where the bubbles are drawn (interior, land, background) and how they move">scene <small>· where + motion</small></strong>
+			<strong title="where drawn (interior, land, background) and how they move">scene <small>· where + motion</small></strong>
 			<span id="scene-buttons"></span>
 			<span id="combo-note"></span>
 		</div>
 		<div class="row">
 		<span style="flex:1"></span>
-		<button id="cam" title="camera auto-orbit: 'auto' orbits until you move the camera (drag, wheel, pinch), then turns off; 'on' always orbits; 'off' never orbits">cam: auto</button>
+		<button id="cam" title="camera auto-orbit for the scene-aware shaders (the ones that read the shared camera basis): 'auto' orbits until you move the camera (drag, wheel, pinch), then turns off; 'on' always orbits; 'off' never orbits. Dragging grabs the scene — it moves with the cursor, the same fraction of a turn at any window size. Shown as 'cam: n/a' for the shaders that orbit from iMouse inside their own GLSL">cam: auto</button>
 		<button id="mov" title="sphere animation: 'on' advances the feed time that drives bubble motion; 'off' freezes the spheres in place (camera and visual effects keep moving)">mov: on</button>
 		<button id="aa" title="SMAA 1x post-process antialiasing (auto-off above 2K)">aa: on</button>
 		<label id="music-wrap" class="off" title="play the shader's procedural music"><input type="checkbox" id="music" disabled> music</label>

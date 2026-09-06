@@ -1,11 +1,7 @@
 implement system to run these shaders
 
-https://www.shadertoy.com/view/XdXXzB
-https://www.shadertoy.com/view/llsSDf
-https://www.shadertoy.com/view/ld3SDl
-
 https://www.shadertoy.com/view/XdVSRV
-
+	example-shadertoy/XdVSRV.txt
 
 search internet other sites that better support vertex shader and have examples multiple glass bubbles in 3d
 
