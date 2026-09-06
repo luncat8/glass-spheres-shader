@@ -5,6 +5,8 @@
 window.SHADER_llsSDf = {
   "id": "llsSDf",
   "title": "cellular bubble metaballs",
+  "scenes": ["own"],
+  "group": "orig",
   "url": "https://www.shadertoy.com/view/llsSDf",
   "channels": {},
   "music": true,

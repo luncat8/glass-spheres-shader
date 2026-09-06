@@ -13,6 +13,8 @@
 window.SHADER_thick_glass = {
   "id": "thick_glass",
   "title": "glass bubbles with visible wall thickness (4 spheres)",
+  "scenes": ["own"],
+  "group": "own",
   "channels": {"0":"env_cube","1":"env_cube","2":"noise","3":"noise"},
   "source":
 `#define PI 3.14159265359

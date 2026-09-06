@@ -4,6 +4,8 @@
 window.SHADER_multi_fresnel = {
   "id": "multi_fresnel",
   "title": "multi-bubble refractive spheres with fbm fresnel",
+  "scenes": ["own"],
+  "group": "own",
   "channels": {"0":"env_cube","1":"env_cube","2":"noise","3":"noise"},
   "source":
 `#define PI 3.14159265359

@@ -76,6 +76,7 @@
 			axYaw, axPch, axRol, driftA, driftB, driftC, driftPh, rad, radJit, yOff };
 	}
 	const C32 = makeCloud(32);
+	const C61 = makeCloud(61);
 	const C64 = makeCloud(64);
 	const C128 = makeCloud(128);
 
@@ -199,9 +200,18 @@
 		}
 	}
 
+	// Scene-aware sphere feeds. The scene selector owns the *behaviour* of the
+	// spheres, so one feed serves both motion models: the drifting cloud in
+	// scenes 0..2, and the elastic AABB bounce in the cage scene (3). Shaders
+	// therefore never have to be rebuilt when the scene changes — only the
+	// uScene uniform and the values written into their existing array buffer.
 	Feeds.bubbles = function (time, meta, out) {
 		if (paramVal(meta, 'uScene', 0) === 3) { feedCageInside(time, meta, out); return; }
 		feedCloud(C32, time, meta, out);
+	};
+	Feeds.bubbles61 = function (time, meta, out) {
+		if (paramVal(meta, 'uScene', 0) === 3) { feedCageInside(time, meta, out); return; }
+		feedCloud(C61, time, meta, out);
 	};
 	Feeds.bubbles64 = function (time, meta, out) { feedCloud(C64, time, meta, out); };
 	Feeds.bubbles128 = function (time, meta, out) { feedCloud(C128, time, meta, out); };
@@ -238,18 +248,19 @@
 	// the same reflected AABB trajectories when the cage scene is selected.
 	Feeds.sceneBubbles4 = function (time, meta, out) {
 		if (paramVal(meta, 'uScene', 0) === 3) { feedCageInside(time, meta, out); return; }
-		out[0] = 0.4 * Math.sin(time * 0.50);
-		out[1] = 0.6 * Math.sin(time * 0.90);
+		const s = paramVal(meta, 'uSpread', 1.0);
+		out[0] = s * 0.4 * Math.sin(time * 0.50);
+		out[1] = s * 0.6 * Math.sin(time * 0.90);
 		out[2] = 0.0; out[3] = 1.4;
-		out[4] = 2.0 * Math.cos(time * 0.40);
-		out[5] = -0.4 + 0.3 * Math.sin(time);
-		out[6] = 0.5 * Math.sin(time * 0.6); out[7] = 1.1;
-		out[8] = -1.8 + 0.5 * Math.sin(time * 0.70);
-		out[9] = 0.2 * Math.cos(time * 0.80);
-		out[10] = -0.6; out[11] = 1.0;
-		out[12] = 0.4 * Math.sin(time * 0.30);
-		out[13] = 1.3 * Math.cos(time * 0.40);
-		out[14] = 1.2; out[15] = 0.9;
+		out[4] = s * 2.0 * Math.cos(time * 0.40);
+		out[5] = s * (-0.4 + 0.3 * Math.sin(time));
+		out[6] = s * 0.5 * Math.sin(time * 0.6); out[7] = 1.1;
+		out[8] = s * (-1.8 + 0.5 * Math.sin(time * 0.70));
+		out[9] = s * 0.2 * Math.cos(time * 0.80);
+		out[10] = s * -0.6; out[11] = 1.0;
+		out[12] = s * 0.4 * Math.sin(time * 0.30);
+		out[13] = s * 1.3 * Math.cos(time * 0.40);
+		out[14] = s * 1.2; out[15] = 0.9;
 	};
 
 	// The outer balls have zero initial horizontal velocity. With no friction

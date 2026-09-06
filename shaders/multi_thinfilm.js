@@ -10,6 +10,8 @@
 window.SHADER_multi_thinfilm = {
   "id": "multi_thinfilm",
   "title": "multi-bubble thin-film interference (3 bubbles, smooth-min)",
+  "scenes": ["own"],
+  "group": "own",
   "channels": {"0":"env_cube","1":"thickness","2":"noise","3":"noise"},
   "source":
 `/*

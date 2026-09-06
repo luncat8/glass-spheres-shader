@@ -13,6 +13,9 @@
 window.SHADER_hollow_bubbles = {
 	"id": "hollow_bubbles",
 	"title": "hollow glass bubbles - membrane wall, 32 spheres, sliders",
+	"group": "scene",
+	"scenes": ["checker", "rainbow", "colorbox", "cage"],
+	"nativeScene": "checker",
 	"channels": { "0": "env_cube", "1": "env_cube", "2": "noise", "3": "noise" },
 	"arrays": [
 		{ "name": "uBubbles", "type": "vec4", "count": 32, "feed": "bubbles" },
@@ -26,24 +29,19 @@ window.SHADER_hollow_bubbles = {
 		{ "name": "uSel", "type": "vec4", "feed": "camSel" }
 	],
 	"params": [
-		{ "name": "uScene", "type": "int", "label": "scene", "def": 0, "hint": "interior behind the bubbles", "options": [
-			{ "value": 0, "label": "checker land" },
-			{ "value": 1, "label": "rainbow" },
-			{ "value": 2, "label": "color box" },
-			{ "value": 3, "label": "cage" }
-		] },
+		{ "name": "uScene", "type": "int", "def": 0, "hidden": true },
 		{ "name": "uCount", "type": "int", "label": "bubbles", "min": 1, "max": 32, "step": 1, "def": 14, "hint": "active bubbles" },
-		{ "name": "uTopCount", "type": "int", "label": "on top", "min": 0, "max": 3, "step": 1, "def": 3, "hint": "balls above the cage; used by the cage scene" },
-		{ "name": "uCageSize", "type": "float", "label": "cage", "min": 2.0, "max": 4.5, "step": 0.1, "def": 2.2, "hint": "cube half-size; used by the cage scene" },
-		{ "name": "uWireWidth", "type": "float", "label": "wire", "min": 0.008, "max": 0.08, "step": 0.002, "def": 0.026, "hint": "cage line thickness" },
-		{ "name": "uGravity", "type": "float", "label": "gravity", "min": 2.5, "max": 10.0, "step": 0.25, "def": 4.75, "hint": "top-ball gravity" },
+		{ "name": "uTopCount", "type": "int", "label": "on top", "min": 0, "max": 3, "step": 1, "def": 3, "scenes": ["cage"], "hint": "balls bouncing on the top face of the cage" },
+		{ "name": "uCageSize", "type": "float", "label": "cage", "min": 2.0, "max": 4.5, "step": 0.1, "def": 2.2, "scenes": ["cage"], "hint": "cube half-size" },
+		{ "name": "uWireWidth", "type": "float", "label": "wire", "min": 0.008, "max": 0.08, "step": 0.002, "def": 0.026, "scenes": ["cage"], "hint": "cage line thickness" },
+		{ "name": "uGravity", "type": "float", "label": "gravity", "min": 2.5, "max": 10.0, "step": 0.25, "def": 4.75, "scenes": ["cage"], "hint": "top-ball gravity" },
 		{ "name": "uWall", "type": "float", "label": "wall", "min": 0.005, "max": 0.5, "step": 0.005, "def": 0.06, "hint": "glass wall thickness, as a fraction of the bubble radius" },
 		{ "name": "uIor", "type": "float", "label": "ior", "min": 1.0, "max": 2.0, "step": 0.01, "def": 1.45, "hint": "index of refraction of the glass" },
 		{ "name": "uDensity", "type": "float", "label": "tint", "min": 0.0, "max": 3.0, "step": 0.05, "def": 0.7, "hint": "Beer-Lambert absorption through the wall" },
 		{ "name": "uIrid", "type": "float", "label": "iris", "min": 0.0, "max": 1.0, "step": 0.05, "def": 0.55, "hint": "thin-film iridescence on the membrane" },
 		{ "name": "uDisp", "type": "float", "label": "disp", "min": 0.0, "max": 1.0, "step": 0.05, "def": 0.35, "hint": "chromatic dispersion of the transmitted ray" },
 		{ "name": "uLayers", "type": "float", "label": "layers", "min": 1, "max": 10, "step": 1, "def": 6, "hint": "max wall crossings per ray (depth of see-through)" },
-		{ "name": "uSpread", "type": "float", "label": "spread", "min": 0.5, "max": 2.0, "step": 0.05, "def": 1.0, "hint": "scene scale" },
+		{ "name": "uSpread", "type": "float", "label": "spread", "min": 0.5, "max": 2.0, "step": 0.05, "def": 1.0, "scenes": ["checker", "rainbow", "colorbox"], "hint": "how far the drifting bubbles wander" },
 		{ "name": "uSize", "type": "float", "label": "size", "min": 0.4, "max": 1.6, "step": 0.05, "def": 1.0, "hint": "bubble radius scale" },
 		{ "name": "uAA", "type": "float", "label": "AA", "min": 0, "max": 1, "step": 1, "def": 0, "hint": "2x2 supersampling (4x cost)" }
 	],

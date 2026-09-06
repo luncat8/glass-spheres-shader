@@ -20,7 +20,7 @@
 		dist: 7.5,
 		target: [0, 0, 0],
 		sel: [0, 0, 0, 0],   // selected bubble centre + radius (w = 0 => none)
-		selSrc: null,       // { kind: 'bubbles' | 'fixed4' | cage feed, idx } or null
+		selSrc: null,       // { kind: <array feed name>, idx } or null
 		onModeChange: null, // ui hook to refresh the camera button label
 	};
 
@@ -32,7 +32,6 @@
 	// preallocated scratch (AGENTS.md: no allocations in per-frame hot paths)
 	const fw = [0, 0, 0], rt = [0, 0, 0], up = [0, 0, 0], pos = [0, 0, 0];
 	const ray = [0, 0, 0];
-	const fixed4 = new Float32Array(16); // mirror of GLSL.bubbles4 (thick_*)
 	const cagePick = new Float32Array((61 + 3) * 4); // merged only on click
 	const feeds = {};                    // filled below, registered once
 
@@ -93,73 +92,58 @@
 		return fallback;
 	}
 
-	// exact mirror of GLSL.bubbles4 (the thick_* shaders draw these four, so the
-	// JS pick, the selected-bubble orbit target and the highlighting all agree
-	// with what the GPU renders)
-	function bubble4(i, t) {
-		const j = i * 4;
-		if (i === 0) {
-			fixed4[j] = 0.4 * Math.sin(t * 0.50);
-			fixed4[j + 1] = 0.6 * Math.sin(t * 0.90);
-			fixed4[j + 2] = 0.0; fixed4[j + 3] = 1.4;
-		} else if (i === 1) {
-			fixed4[j] = 2.0 * Math.cos(t * 0.40);
-			fixed4[j + 1] = -0.4 + 0.3 * Math.sin(t);
-			fixed4[j + 2] = 0.5 * Math.sin(t * 0.6);
-			fixed4[j + 3] = 1.1;
-		} else if (i === 2) {
-			fixed4[j] = -1.8 + 0.5 * Math.sin(t * 0.70);
-			fixed4[j + 1] = 0.2 * Math.cos(t * 0.80);
-			fixed4[j + 2] = -0.6; fixed4[j + 3] = 1.0;
-		} else {
-			fixed4[j] = 0.4 * Math.sin(t * 0.30);
-			fixed4[j + 1] = 1.3 * Math.cos(t * 0.40);
-			fixed4[j + 2] = 1.2; fixed4[j + 3] = 0.9;
-		}
+	// Feeds that carry the "main" sphere set of a shader, mapped to the param
+	// that says how many of them are active ('' = the whole array). Adding a
+	// new sphere feed only means adding a line here.
+	const MAIN_FEEDS = {
+		bubbles: 'uCount',
+		bubbles61: 'uCount',
+		cageInside: 'uCount',
+		sceneBubbles4: '',
+	};
+
+	function activeCount(meta, arr) {
+		const countName = MAIN_FEEDS[arr.feed];
+		if (!countName) return arr.count;
+		return Math.min(arr.count, Math.max(0, Math.round(paramVal(meta, countName, arr.count))));
 	}
 
-	// Locate the pickable sphere set for the current shader. Cage has two
-	// uniforms, so its active prefixes are copied into one preallocated buffer
-	// for the click ray cast. This function runs on clicks, not in the frame loop.
+	function findArray(meta, feed) {
+		const as = (meta && meta.arrays) || [];
+		for (let i = 0; i < as.length; i++) if (as[i].feed === feed) return as[i];
+		return null;
+	}
+
+	function findMainArray(meta) {
+		const as = (meta && meta.arrays) || [];
+		for (let i = 0; i < as.length; i++) if (MAIN_FEEDS[as[i].feed] !== undefined) return as[i];
+		return null;
+	}
+
+	// Locate the pickable sphere set for the current shader. In the cage scene
+	// the top balls are a second uniform, so both active prefixes are copied
+	// into one preallocated buffer for the click ray cast. This runs on clicks,
+	// never in the frame loop.
 	function pickable(meta, time) {
 		if (!meta) return null;
-		const as = (meta && meta.arrays) || [];
-		let bubbles = null, scene4 = null, cageInside = null, cageTop = null;
-		for (let i = 0; i < as.length; i++) {
-			if (as[i].feed === 'bubbles') bubbles = as[i];
-			if (as[i].feed === 'sceneBubbles4') scene4 = as[i];
-			if (as[i].feed === 'cageInside') cageInside = as[i];
-			if (as[i].feed === 'cageTop') cageTop = as[i];
-		}
-
+		const main = findMainArray(meta);
+		const cageTop = findArray(meta, 'cageTop');
 		const cageScene = paramVal(meta, 'uScene', -1) === 3;
-		const inside = cageInside || (cageScene ? (bubbles || scene4) : null);
-		if (inside && cageTop) {
-			const insideFeed = root.Feeds && root.Feeds[inside.feed];
+
+		if (main) {
+			const mainFeed = root.Feeds && root.Feeds[main.feed];
+			if (!mainFeed) return null;
+			mainFeed(time, meta, main.buf);
+			const ni = activeCount(meta, main);
+			if (!cageScene || !cageTop) return { arr: main.buf, n: ni, kind: main.feed };
+
 			const topFeed = root.Feeds && root.Feeds[cageTop.feed];
-			if (!insideFeed || !topFeed) return null;
-			insideFeed(time, meta, inside.buf);
+			if (!topFeed) return { arr: main.buf, n: ni, kind: main.feed };
 			topFeed(time, meta, cageTop.buf);
-			const countName = inside.feed === 'bubbles' || inside.feed === 'cageInside' ? 'uCount' : '';
-			const ni = countName ? Math.min(inside.count, Math.max(0, Math.round(paramVal(meta, countName, inside.count)))) : inside.count;
 			const nt = Math.min(cageTop.count, Math.max(0, Math.round(paramVal(meta, 'uTopCount', cageTop.count))));
-			for (let i = 0; i < ni * 4; i++) cagePick[i] = inside.buf[i];
+			for (let i = 0; i < ni * 4; i++) cagePick[i] = main.buf[i];
 			for (let i = 0; i < nt * 4; i++) cagePick[ni * 4 + i] = cageTop.buf[i];
-			return { arr: cagePick, n: ni + nt, kind: 'cage', split: ni, insideKind: inside.feed };
-		}
-		const regular = bubbles || scene4;
-		if (regular) {
-			const feed = root.Feeds && root.Feeds[regular.feed];
-			if (!feed) return null;
-			feed(time, meta, regular.buf);
-			const n = regular.feed === 'bubbles'
-				? Math.min(regular.count, Math.round(paramVal(meta, 'uCount', regular.count)))
-				: regular.count;
-			return { arr: regular.buf, n, kind: regular.feed };
-		}
-		if (meta.fixed4) {
-			for (let i = 0; i < 4; i++) bubble4(i, time);
-			return { arr: fixed4, n: 4, kind: 'fixed4' };
+			return { arr: cagePick, n: ni + nt, kind: 'cage', split: ni, insideKind: main.feed };
 		}
 		return null;
 	}
@@ -169,41 +153,19 @@
 		const s = Cam.selSrc;
 		const meta = runner && runner.current;
 		if (!s || !meta) return;
-		if (s.kind === 'cageTop' && meta.id !== 'cage' && paramVal(meta, 'uScene', -1) !== 3) {
-			clearSel();
-			return;
-		}
+		const cageScene = paramVal(meta, 'uScene', -1) === 3;
+		// the top balls only exist in the cage scene
+		if (s.kind === 'cageTop' && !cageScene) { clearSel(); return; }
 		const time = (runner && runner.sceneTime !== undefined) ? runner.sceneTime : (runner.elapsed || 0);
-		let src = null, n = 0;
-		if (s.kind === 'bubbles' || s.kind === 'sceneBubbles4') {
-			const as = meta.arrays || [];
-			for (let i = 0; i < as.length; i++) {
-				if (as[i].feed !== s.kind) continue;
-				src = as[i].buf;
-				n = s.kind === 'bubbles'
-					? Math.min(as[i].count, Math.round(paramVal(meta, 'uCount', as[i].count)))
-					: as[i].count;
-				const feed = root.Feeds && root.Feeds[s.kind];
-				if (feed) feed(time, meta, src);
-				break;
-			}
-		} else if (s.kind === 'cageInside' || s.kind === 'cageTop') {
-			const feedName = s.kind;
-			const countName = s.kind === 'cageInside' ? 'uCount' : 'uTopCount';
-			const as = meta.arrays || [];
-			for (let i = 0; i < as.length; i++) {
-				if (as[i].feed !== feedName) continue;
-				src = as[i].buf;
-				n = Math.min(as[i].count, Math.max(0, Math.round(paramVal(meta, countName, as[i].count))));
-				const feed = root.Feeds && root.Feeds[feedName];
-				if (feed) feed(time, meta, src);
-				break;
-			}
-		} else {
-			for (let i = 0; i < 4; i++) bubble4(i, time);
-			src = fixed4; n = 4;
-		}
-		if (!src || s.idx >= n) { clearSel(); return; }
+		const arr = findArray(meta, s.kind);
+		if (!arr) { clearSel(); return; }
+		const src = arr.buf;
+		const n = s.kind === 'cageTop'
+			? Math.min(arr.count, Math.max(0, Math.round(paramVal(meta, 'uTopCount', arr.count))))
+			: activeCount(meta, arr);
+		const feed = root.Feeds && root.Feeds[s.kind];
+		if (feed) feed(time, meta, src);
+		if (s.idx >= n) { clearSel(); return; }
 		const j = s.idx * 4;
 		Cam.sel[0] = src[j]; Cam.sel[1] = src[j + 1]; Cam.sel[2] = src[j + 2]; Cam.sel[3] = src[j + 3];
 		Cam.target[0] = src[j]; Cam.target[1] = src[j + 1]; Cam.target[2] = src[j + 2];

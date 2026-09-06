@@ -17,9 +17,9 @@
 			tech: 'Raymarched smooth-min union of animated spheres (soap-film merge), 6-wavelength thin-film interference and chromatic dispersion resampled to RGB; ~24 march steps with a 4-tap SDF normal.',
 			file: 'multi_thinfilm.js',
 		},
-		cage: {
-			tech: 'Analytic cage scene: up to 61 independently reflected sphere trajectories inside an AABB, three gravity-driven vertical bounces on its top face, depth-aware ray/segment wireframe edges, and a smooth procedural pastel-cloud environment.',
-			file: 'cage.js',
+		analytic_layers: {
+			tech: 'Analytic layered glass: one bounded ray/sphere pass over up to 61 spheres keeps the nearest three layers and composites them back to front. Scene-aware — in the cage scene it also draws depth-correct ray/segment wireframe edges, three gravity-driven vertical bounces on the top face and a procedural pastel-cloud sky.',
+			file: 'analytic_layers.js',
 		},
 		hollow_bubbles: {
 			tech: 'Analytic membrane tracing: each ray crosses thin glass shells (outer + inner sphere per bubble, up to 10 layers), refracting through the wall with Fresnel, Beer-Lambert tint and thin-film iridescence; JS feeds a uBubbles vec4[32] array uniform.',

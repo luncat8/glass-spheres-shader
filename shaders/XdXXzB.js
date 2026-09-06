@@ -4,6 +4,8 @@
 window.SHADER_XdXXzB = {
   "id": "XdXXzB",
   "title": "refractive sphere with fbm fresnel",
+  "scenes": ["own"],
+  "group": "orig",
   "url": "https://www.shadertoy.com/view/XdXXzB",
   "channels": {"0":"env_cube","1":"env_cube","2":"noise","3":"noise"},
   "source":

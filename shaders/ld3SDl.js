@@ -15,6 +15,8 @@
 window.SHADER_ld3SDl = {
   "id": "ld3SDl",
   "title": "Fast Thin-Film Interference",
+  "scenes": ["own"],
+  "group": "orig",
   "url": "https://www.shadertoy.com/view/ld3SDl",
   "channels": {"0":"env_cube","1":"thickness","2":"noise","3":"noise"},
   "source":

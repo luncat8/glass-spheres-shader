@@ -1,15 +1,25 @@
-// Cage scene: pastel clouds, a black wire cube, freely bouncing glass spheres,
-// and three opaque balls bouncing vertically on its top face.
+// Analytic layered glass — a *bubble shader* (how spheres are drawn), usable in
+// every shared scene.
 //
-// Sphere positions are supplied by js/scene.js. Rendering stays analytic: one
-// ray/sphere pass keeps the nearest three layers and twelve ray/segment tests
-// draw the cage edges, so the full 61-sphere setting remains bounded.
-window.SHADER_cage = {
-	"id": "cage",
-	"title": "cage - pastel cloud cube and bouncing spheres",
+// One ray/sphere pass keeps the nearest three layers and composites them back to
+// front, which preserves overlap depth without multiplying work by layer count.
+// Up to 61 spheres stay bounded because nothing marches and nothing recurses.
+//
+// Scene (where it draws + how the spheres move) is chosen independently in the
+// toolbar and arrives as `uScene`:
+//   0/1/2 — shared interiors, spheres drift on tilted Lissajous orbits
+//   3     — cage: pastel sky, black wire cube, elastic bounces off the six walls
+//           and three balls bouncing on the top face
+// Sphere positions always come from js/scene.js (feed `bubbles61`).
+window.SHADER_analytic_layers = {
+	"id": "analytic_layers",
+	"title": "analytic layered glass - nearest 3 layers, up to 61 spheres",
+	"group": "scene",
+	"scenes": ["checker", "rainbow", "colorbox", "cage"],
+	"nativeScene": "cage",
 	"channels": {},
 	"arrays": [
-		{ "name": "uInside", "type": "vec4", "count": 61, "feed": "cageInside" },
+		{ "name": "uInside", "type": "vec4", "count": 61, "feed": "bubbles61" },
 		{ "name": "uTop", "type": "vec4", "count": 3, "feed": "cageTop" }
 	],
 	"vars": [
@@ -20,21 +30,22 @@ window.SHADER_cage = {
 		{ "name": "uSel", "type": "vec4", "feed": "camSel" }
 	],
 	"params": [
-		{ "name": "uCount", "type": "int", "label": "inside", "min": 1, "max": 61, "step": 1, "def": 14, "hint": "spheres moving freely inside the cage" },
-		{ "name": "uTopCount", "type": "int", "label": "on top", "min": 0, "max": 3, "step": 1, "def": 3, "hint": "balls bouncing vertically on the top face" },
-		{ "name": "uCageSize", "type": "float", "label": "cage", "min": 2.0, "max": 4.5, "step": 0.1, "def": 2.2, "hint": "cube half-size" },
+		{ "name": "uScene", "type": "int", "def": 3, "hidden": true },
+		{ "name": "uCount", "type": "int", "label": "spheres", "min": 1, "max": 61, "step": 1, "def": 14, "hint": "active spheres" },
+		{ "name": "uTopCount", "type": "int", "label": "on top", "min": 0, "max": 3, "step": 1, "def": 3, "scenes": ["cage"], "hint": "balls bouncing vertically on the top face" },
+		{ "name": "uCageSize", "type": "float", "label": "cage", "min": 2.0, "max": 4.5, "step": 0.1, "def": 2.2, "scenes": ["cage"], "hint": "cube half-size" },
+		{ "name": "uWireWidth", "type": "float", "label": "wire", "min": 0.008, "max": 0.08, "step": 0.002, "def": 0.026, "scenes": ["cage"], "hint": "cage line thickness in world units" },
+		{ "name": "uGravity", "type": "float", "label": "gravity", "min": 2.5, "max": 10.0, "step": 0.25, "def": 4.75, "scenes": ["cage"], "hint": "gravity for the balls on top" },
+		{ "name": "uSpread", "type": "float", "label": "spread", "min": 0.5, "max": 2.0, "step": 0.05, "def": 1.0, "scenes": ["checker", "rainbow", "colorbox"], "hint": "how far the drifting spheres wander" },
 		{ "name": "uSize", "type": "float", "label": "size", "min": 0.5, "max": 1.6, "step": 0.05, "def": 1.0, "hint": "sphere radius scale" },
-		{ "name": "uWireWidth", "type": "float", "label": "wire", "min": 0.008, "max": 0.08, "step": 0.002, "def": 0.026, "hint": "cage line thickness in world units" },
-		{ "name": "uGravity", "type": "float", "label": "gravity", "min": 2.5, "max": 10.0, "step": 0.25, "def": 4.75, "hint": "gravity for the balls on top" },
 		{ "name": "uWall", "type": "float", "label": "wall", "min": 0.005, "max": 0.25, "step": 0.005, "def": 0.045, "hint": "glass membrane thickness as a fraction of radius" },
-		{ "name": "uIor", "type": "float", "label": "ior", "min": 1.0, "max": 2.0, "step": 0.01, "def": 1.42, "hint": "inside-sphere index of refraction" },
+		{ "name": "uIor", "type": "float", "label": "ior", "min": 1.0, "max": 2.0, "step": 0.01, "def": 1.42, "hint": "index of refraction" },
 		{ "name": "uDensity", "type": "float", "label": "tint", "min": 0.0, "max": 3.0, "step": 0.05, "def": 0.55, "hint": "glass membrane absorption" },
 		{ "name": "uIrid", "type": "float", "label": "iris", "min": 0.0, "max": 1.0, "step": 0.05, "def": 0.55, "hint": "thin-film colour on sphere rims" },
 		{ "name": "uAA", "type": "float", "label": "render AA", "min": 0, "max": 1, "step": 1, "def": 0, "hint": "optional 2x2 shader supersampling in addition to the global AA button" }
 	],
 	"source":
 `${GLSL.common}
-#define uScene 3
 ${GLSL.raySphere}
 ${GLSL.camera}
 ${GLSL.env}
@@ -108,8 +119,10 @@ void sphereHits (vec3 ro, vec3 rd, out Hit h0, out Hit h1, out Hit h2) {
 		float t = h.x > EPS ? h.x : h.y;
 		addHit (t, h.y, sphere, float (i), 0.0, h0, h1, h2);
 	}
+	// the balls on top belong to the cage scene only
+	int topN = (uScene == 3) ? uTopCount : 0;
 	for (int i = 0; i < MAX_TOP; i++) {
-		if (i >= uTopCount) break;
+		if (i >= topN) break;
 		vec4 sphere = uTop[i];
 		vec2 h = ray_sphere (ro, rd, sphere.xyz, sphere.w);
 		if (h.y <= EPS || h.y < h.x) continue;
@@ -132,7 +145,7 @@ vec3 shadeGlass (vec3 behind, vec3 ro, vec3 rd, Hit h) {
 	if (dot (refr, refr) > 0.001) {
 		// A small directional contribution suggests refraction without replacing
 		// geometry already composed behind this transparent shell.
-		transmit = mix (transmit, transmit * envPastel (refr), 0.08 * (1.0 - F));
+		transmit = mix (transmit, transmit * env (refr), 0.08 * (1.0 - F));
 	}
 
 	float sw = swirl ((p - h.sphere.xyz) / h.sphere.w * 4.0
@@ -173,8 +186,9 @@ vec3 selectionGlow (vec3 ro, vec3 rd) {
 vec3 trace (vec3 ro, vec3 rd) {
 	Hit h0, h1, h2;
 	sphereHits (ro, rd, h0, h1, h2);
-	float wireT, wireMask;
-	cageWireHit (ro, rd, wireT, wireMask);
+	float wireT = BIG, wireMask = 0.0;
+	// the wire cube is world-space geometry, so it only exists in the cage scene
+	if (uScene == 3) cageWireHit (ro, rd, wireT, wireMask);
 
 	vec3 col = envSun (rd);
 	bool wireDone = wireMask <= 0.0;

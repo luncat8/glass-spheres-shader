@@ -2,22 +2,61 @@
 (function () {
 	if (typeof module === 'object' && module.exports) { module.exports = {}; return; }
 
-	let canvas, statusEl, metaEl, errEl, fpsEl, bar, buttonsHost, paramsHost;
+	let canvas, statusEl, metaEl, errEl, fpsEl, bar, buttonsHost, sceneHost, noteEl, paramsHost;
 	let musicChk, musicWrap, camBtn, movBtn, aaBtn, copyBtn;
 	let runner;
 	let firstShader = null;
 	let pendingErr = '';
 	let lastFpsTick = 0;
+	let curScene = 'checker';   // the scene selector's state, shared by every shader
 
 	function setErr(msg) {
 		errEl.textContent = msg || '';
 		errEl.style.display = msg ? 'block' : 'none';
 	}
 
-	function setActive(id) {
+	function shaderById(id) {
+		const list = window.SHADERS || [];
+		for (let i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+		return null;
+	}
+
+	// notes and tooltips name shaders by id, which is what the buttons show
+	function shaderName(id) { return id; }
+
+	// the note under the selectors explains any fallback the last click forced,
+	// so a combination that does not exist never looks like a broken click
+	function setNote(msg) {
+		if (!noteEl) return;
+		noteEl.textContent = msg || '';
+		noteEl.style.display = msg ? 'inline' : 'none';
+	}
+
+	// ------------------------------------------------- selector button state
+
+	function refreshSelectors() {
+		const meta = runner && runner.current;
 		const btns = buttonsHost.querySelectorAll('button[data-id]');
 		for (let i = 0; i < btns.length; i++) {
-			btns[i].classList.toggle('active', btns[i].dataset.id === id);
+			const m = shaderById(btns[i].dataset.id);
+			const ok = window.Scenes.supports(m, curScene);
+			btns[i].classList.toggle('active', !!meta && btns[i].dataset.id === meta.id);
+			btns[i].classList.toggle('alt', !ok);
+			btns[i].title = (m && (m.title || m.id)) +
+				(ok ? '' : ' — cannot draw the "' + window.Scenes.get(curScene).label +
+					'" scene; picking it switches the scene to "' + window.Scenes.get(window.Scenes.nativeScene(m)).label + '"');
+		}
+		const sbtns = sceneHost.querySelectorAll('button[data-scene]');
+		for (let i = 0; i < sbtns.length; i++) {
+			const sc = window.Scenes.get(sbtns[i].dataset.scene);
+			const ok = window.Scenes.supports(meta, sc.id);
+			const fallback = ok ? null : window.Scenes.nativeShader(sc.id, window.SHADERS || []);
+			sbtns[i].classList.toggle('active', sc.id === curScene);
+			sbtns[i].classList.toggle('alt', !ok && !!fallback);
+			sbtns[i].disabled = !ok && !fallback;
+			sbtns[i].title = sc.hint +
+				(ok || !fallback ? '' : ' — the current shader cannot draw it; picking it switches the shader to ' + shaderName(fallback)) +
+				(!ok && !fallback ? ' — pick one of the "own scene" or "shadertoy originals" shaders to use it' : '');
 		}
 	}
 
@@ -53,21 +92,55 @@
 		return item;
 	}
 
+	// shaders are grouped by how they relate to the scene selector, so the row
+	// itself explains which buttons are combinable with which scene
+	const GROUPS = [
+		{ id: 'scene', label: 'scene-aware:', hint: 'these renderers work with every scene in the row below' },
+		{ id: 'own', label: 'own scene:', hint: 'cubemap/iMouse pipelines that bring their own background and motion' },
+		{ id: 'orig', label: 'shadertoy originals:', hint: 'unmodified ports; they bring their own background and motion' },
+	];
+
 	function renderButtons(list) {
 		buttonsHost.textContent = '';
-		for (let i = 0; i < list.length; i++) buttonsHost.appendChild(buildButton(list[i]));
+		for (let g = 0; g < GROUPS.length; g++) {
+			const members = list.filter((s) => (s.group || 'orig') === GROUPS[g].id);
+			if (!members.length) continue;
+			const tag = document.createElement('span');
+			tag.className = 'group-tag';
+			tag.textContent = GROUPS[g].label;
+			tag.title = GROUPS[g].hint;
+			buttonsHost.appendChild(tag);
+			for (let i = 0; i < members.length; i++) buttonsHost.appendChild(buildButton(members[i]));
+		}
+	}
+
+	function renderScenes() {
+		sceneHost.textContent = '';
+		const scenes = window.Scenes.list;
+		for (let i = 0; i < scenes.length; i++) {
+			const btn = document.createElement('button');
+			btn.dataset.scene = scenes[i].id;
+			btn.textContent = scenes[i].label;
+			btn.title = scenes[i].hint;
+			btn.addEventListener('click', () => pickScene(scenes[i].id));
+			sceneHost.appendChild(btn);
+		}
 	}
 
 	// parameter strip generated from the current shader's `params` metadata.
 	// Sliders write straight into param.value; options params (p.options) render
-	// as a <select>. runner.js uploads the values per frame.
+	// as a <select>. Params that only apply to some scenes (the cage sliders)
+	// are hidden in the others, and `uScene` never appears — the scene row owns
+	// it. runner.js uploads the values per frame.
 	function buildParams(meta) {
 		paramsHost.textContent = '';
-		const ps = meta.params || [];
-		paramsHost.style.display = ps.length ? 'flex' : 'none';
+		const ps = (meta && meta.params) || [];
+		let shown = 0;
 		for (let i = 0; i < ps.length; i++) {
 			const p = ps[i];
 			if (p.value === undefined) p.value = p.def;
+			if (!window.Scenes.paramVisible(p, curScene)) continue;
+			shown++;
 			const wrap = document.createElement('label');
 			wrap.className = 'param';
 			wrap.title = p.hint || p.name;
@@ -100,6 +173,15 @@
 			wrap.appendChild(name); wrap.appendChild(slider); wrap.appendChild(read);
 			paramsHost.appendChild(wrap);
 		}
+		paramsHost.style.display = 'flex';
+		if (shown) return;
+		// an empty strip used to look like a bug; say why it is empty instead
+		const hint = document.createElement('span');
+		hint.className = 'param-empty';
+		hint.textContent = (meta && meta.params && meta.params.length)
+			? 'no parameters for this shader in the "' + window.Scenes.get(curScene).label + '" scene'
+			: 'this shader has no parameters';
+		paramsHost.appendChild(hint);
 	}
 
 	// music is off by default; only shaders with `music: true` have a piece.
@@ -180,9 +262,29 @@
 		return (step >= 1) ? String(v | 0) : v.toFixed(step >= 0.1 ? 1 : (step >= 0.01 ? 2 : 3));
 	}
 
-	function pick(id) {
+	// ------------------------------------------------------ the two selectors
+	//
+	// shader = HOW the bubbles are drawn, scene = WHERE they are drawn and HOW
+	// they move. They are independent: `curScene` is global, so switching the
+	// shader keeps the scene and switching the scene keeps the shader.
+	//
+	// Not every pair exists. The selector the user just clicked always wins and
+	// the other one falls back to its native partner, with a note saying so.
+
+	function pick(id, note) {
+		const meta = shaderById(id);
+		if (!meta) { setErr('unknown shader id: ' + id); return; }
+		let msg = note || '';
+		if (!window.Scenes.supports(meta, curScene)) {
+			const from = window.Scenes.get(curScene).label;
+			const next = window.Scenes.nativeScene(meta);
+			curScene = next;
+			msg = meta.id + ' cannot draw the "' + from + '" scene — scene switched to "' +
+				window.Scenes.get(next).label + '"';
+		}
+		window.Scenes.apply(meta, curScene);
 		try {
-			const meta = runner.select(id);
+			runner.select(id);
 			if (window.Cam) window.Cam.attach(meta);
 			metaEl.textContent = meta.title || meta.id;
 			if (meta.url) {
@@ -199,13 +301,40 @@
 			syncMusic(meta, true);
 			updateCam();
 			if (copyBtn) copyBtn.title = window.Prompts ? window.Prompts.summary(meta) : '';
-			setActive(id);
+			refreshSelectors();
+			setNote(msg);
 			setErr('');
 			statusEl.textContent = 'rendering';
 		} catch (e) {
 			setErr(String(e.message || e));
 			statusEl.textContent = 'error';
 		}
+	}
+
+	// Switching the scene never recompiles: the shader already declares the
+	// hidden `uScene` uniform and its sphere feed is scene-aware, so only the
+	// param value, the visible sliders and the selection need refreshing.
+	function pickScene(sceneId) {
+		const meta = runner && runner.current;
+		if (!meta) return;
+		const sc = window.Scenes.get(sceneId);
+		if (!window.Scenes.supports(meta, sceneId)) {
+			const next = window.Scenes.nativeShader(sceneId, window.SHADERS || []);
+			if (!next) {
+				setNote('"' + sc.label + '" is not a shared scene — pick a shader from the "own scene" or "shadertoy originals" group');
+				return;
+			}
+			curScene = sceneId;
+			pick(next, 'scene "' + sc.label + '" needs another renderer — shader switched to ' + shaderName(next));
+			return;
+		}
+		if (curScene === sceneId) return;
+		curScene = sceneId;
+		window.Scenes.apply(meta, curScene);
+		if (window.Cam) window.Cam.attach(meta); // motion model changed: drop the selection
+		buildParams(meta);
+		refreshSelectors();
+		setNote('');
 	}
 
 	function tick() {
@@ -228,6 +357,8 @@
 		fpsEl = document.getElementById('fps');
 		bar = document.getElementById('bar');
 		buttonsHost = document.getElementById('shader-buttons');
+		sceneHost = document.getElementById('scene-buttons');
+		noteEl = document.getElementById('combo-note');
 		paramsHost = document.getElementById('params');
 		musicChk = document.getElementById('music');
 		musicWrap = document.getElementById('music-wrap');
@@ -242,7 +373,9 @@
 			return;
 		}
 		renderButtons(list);
-		firstShader = list[0].id;
+		renderScenes();
+		firstShader = (list.filter((s) => (s.group || 'orig') === 'scene')[0] || list[0]).id;
+		curScene = window.Scenes.nativeScene(shaderById(firstShader));
 		try {
 			runner = window.Runner.init(canvas);
 		} catch (e) {
@@ -281,6 +414,11 @@
 		// expose for the browser check
 		window.__app = {
 			pick,
+			pickScene,
+			scene: () => curScene,
+			scenes: () => window.Scenes.list.map((s) => s.id),
+			setScene: pickScene,
+			sceneOf: (id) => window.Scenes.supported(shaderById(id)),
 			stats: () => runner.stats(),
 			list: () => (window.SHADERS || []).map((s) => s.id),
 			current: () => runner.current && runner.current.id,

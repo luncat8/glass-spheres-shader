@@ -7,6 +7,9 @@
 window.SHADER_thick_analytic = {
 	"id": "thick_analytic",
 	"title": "solid glass bubbles - analytic, depth sorted (4)",
+	"group": "scene",
+	"scenes": ["checker", "rainbow", "colorbox", "cage"],
+	"nativeScene": "checker",
 	"channels": { "0": "env_cube", "1": "env_cube", "2": "noise", "3": "noise" },
 	"arrays": [
 		{ "name": "uBubbles", "type": "vec4", "count": 4, "feed": "sceneBubbles4" },
@@ -20,17 +23,13 @@ window.SHADER_thick_analytic = {
 		{ "name": "uSel", "type": "vec4", "feed": "camSel" }
 	],
 	"params": [
-		{ "name": "uScene", "type": "int", "label": "scene", "def": 0, "hint": "interior behind the bubbles", "options": [
-			{ "value": 0, "label": "checker land" },
-			{ "value": 1, "label": "rainbow" },
-			{ "value": 2, "label": "color box" },
-			{ "value": 3, "label": "cage" }
-		] },
-		{ "name": "uTopCount", "type": "int", "label": "on top", "min": 0, "max": 3, "step": 1, "def": 3, "hint": "balls above the cage" },
-		{ "name": "uCageSize", "type": "float", "label": "cage", "min": 2.0, "max": 4.5, "step": 0.1, "def": 2.2, "hint": "cube half-size" },
-		{ "name": "uSize", "type": "float", "label": "size", "min": 0.8, "max": 2.4, "step": 0.05, "def": 1.7, "hint": "inside and top sphere scale in the cage scene" },
-		{ "name": "uWireWidth", "type": "float", "label": "wire", "min": 0.008, "max": 0.08, "step": 0.002, "def": 0.026, "hint": "cage line thickness" },
-		{ "name": "uGravity", "type": "float", "label": "gravity", "min": 2.5, "max": 10.0, "step": 0.25, "def": 4.75, "hint": "top-ball gravity" }
+		{ "name": "uScene", "type": "int", "def": 0, "hidden": true },
+		{ "name": "uSpread", "type": "float", "label": "spread", "min": 0.5, "max": 2.0, "step": 0.05, "def": 1.0, "scenes": ["checker", "rainbow", "colorbox"], "hint": "how far the four bubbles travel" },
+		{ "name": "uTopCount", "type": "int", "label": "on top", "min": 0, "max": 3, "step": 1, "def": 3, "scenes": ["cage"], "hint": "balls bouncing on the top face of the cage" },
+		{ "name": "uCageSize", "type": "float", "label": "cage", "min": 2.0, "max": 4.5, "step": 0.1, "def": 2.2, "scenes": ["cage"], "hint": "cube half-size" },
+		{ "name": "uSize", "type": "float", "label": "size", "min": 0.8, "max": 2.4, "step": 0.05, "def": 1.7, "scenes": ["cage"], "hint": "cage sphere radius scale" },
+		{ "name": "uWireWidth", "type": "float", "label": "wire", "min": 0.008, "max": 0.08, "step": 0.002, "def": 0.026, "scenes": ["cage"], "hint": "cage line thickness" },
+		{ "name": "uGravity", "type": "float", "label": "gravity", "min": 2.5, "max": 10.0, "step": 0.25, "def": 4.75, "scenes": ["cage"], "hint": "top-ball gravity" }
 	],
 	"source":
 `${GLSL.common}
