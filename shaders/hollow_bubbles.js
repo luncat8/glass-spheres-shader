@@ -14,7 +14,10 @@ window.SHADER_hollow_bubbles = {
 	"id": "hollow_bubbles",
 	"title": "hollow glass bubbles - membrane wall, 32 spheres, sliders",
 	"channels": { "0": "env_cube", "1": "env_cube", "2": "noise", "3": "noise" },
-	"arrays": [{ "name": "uBubbles", "type": "vec4", "count": 32, "feed": "bubbles" }],
+	"arrays": [
+		{ "name": "uBubbles", "type": "vec4", "count": 32, "feed": "bubbles" },
+		{ "name": "uTop", "type": "vec4", "count": 3, "feed": "cageTop" }
+	],
 	"vars": [
 		{ "name": "uCamPos", "type": "vec3", "feed": "camPos" },
 		{ "name": "uCamRt", "type": "vec3", "feed": "camRt" },
@@ -26,9 +29,14 @@ window.SHADER_hollow_bubbles = {
 		{ "name": "uScene", "type": "int", "label": "scene", "def": 0, "hint": "interior behind the bubbles", "options": [
 			{ "value": 0, "label": "checker land" },
 			{ "value": 1, "label": "rainbow" },
-			{ "value": 2, "label": "color box" }
+			{ "value": 2, "label": "color box" },
+			{ "value": 3, "label": "cage" }
 		] },
 		{ "name": "uCount", "type": "int", "label": "bubbles", "min": 1, "max": 32, "step": 1, "def": 14, "hint": "active bubbles" },
+		{ "name": "uTopCount", "type": "int", "label": "on top", "min": 0, "max": 3, "step": 1, "def": 3, "hint": "balls above the cage; used by the cage scene" },
+		{ "name": "uCageSize", "type": "float", "label": "cage", "min": 2.0, "max": 4.5, "step": 0.1, "def": 2.2, "hint": "cube half-size; used by the cage scene" },
+		{ "name": "uWireWidth", "type": "float", "label": "wire", "min": 0.008, "max": 0.08, "step": 0.002, "def": 0.026, "hint": "cage line thickness" },
+		{ "name": "uGravity", "type": "float", "label": "gravity", "min": 2.5, "max": 10.0, "step": 0.25, "def": 4.75, "hint": "top-ball gravity" },
 		{ "name": "uWall", "type": "float", "label": "wall", "min": 0.005, "max": 0.5, "step": 0.005, "def": 0.06, "hint": "glass wall thickness, as a fraction of the bubble radius" },
 		{ "name": "uIor", "type": "float", "label": "ior", "min": 1.0, "max": 2.0, "step": 0.01, "def": 1.45, "hint": "index of refraction of the glass" },
 		{ "name": "uDensity", "type": "float", "label": "tint", "min": 0.0, "max": 3.0, "step": 0.05, "def": 0.7, "hint": "Beer-Lambert absorption through the wall" },
@@ -44,6 +52,7 @@ window.SHADER_hollow_bubbles = {
 ${GLSL.raySphere}
 ${GLSL.camera}
 ${GLSL.env}
+${GLSL.cageOverlay}
 ${GLSL.selGlow}
 
 #define MAXB   32
@@ -189,12 +198,12 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 		for (int j = 0; j < 4; j++) {
 			vec2 o = vec2 (float (j / 2), float (j - (j / 2) * 2)) * 0.5 - 0.25;
 			camera (fragCoord + o, ro, rd);
-			col += trace (ro, rd);
+			col += cageOverlay (trace (ro, rd), ro, rd);
 		}
 		col *= 0.25;
 	} else {
 		camera (fragCoord, ro, rd);
-		col = trace (ro, rd);
+		col = cageOverlay (trace (ro, rd), ro, rd);
 	}
 	col += selGlow (ro, rd);
 	fragColor = vec4 (tonemap (col), 1.0);

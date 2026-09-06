@@ -20,7 +20,7 @@
 		dist: 7.5,
 		target: [0, 0, 0],
 		sel: [0, 0, 0, 0],   // selected bubble centre + radius (w = 0 => none)
-		selSrc: null,       // { kind: 'bubbles' | 'fixed4', idx } or null
+		selSrc: null,       // { kind: 'bubbles' | 'fixed4' | cage feed, idx } or null
 		onModeChange: null, // ui hook to refresh the camera button label
 	};
 
@@ -33,6 +33,7 @@
 	const fw = [0, 0, 0], rt = [0, 0, 0], up = [0, 0, 0], pos = [0, 0, 0];
 	const ray = [0, 0, 0];
 	const fixed4 = new Float32Array(16); // mirror of GLSL.bubbles4 (thick_*)
+	const cagePick = new Float32Array((61 + 3) * 4); // merged only on click
 	const feeds = {};                    // filled below, registered once
 
 	let canvas = null, runner = null;
@@ -117,18 +118,44 @@
 		}
 	}
 
-	// locate the pickable sphere set for the current shader. Returns
-	// { arr, n, kind } or null when the shader has no pickable bubbles.
+	// Locate the pickable sphere set for the current shader. Cage has two
+	// uniforms, so its active prefixes are copied into one preallocated buffer
+	// for the click ray cast. This function runs on clicks, not in the frame loop.
 	function pickable(meta, time) {
 		if (!meta) return null;
 		const as = (meta && meta.arrays) || [];
+		let bubbles = null, scene4 = null, cageInside = null, cageTop = null;
 		for (let i = 0; i < as.length; i++) {
-			if (as[i].feed === 'bubbles') {
-				const feed = root.Feeds && root.Feeds[as[i].feed];
-				if (!feed) return null;
-				feed(time, meta, as[i].buf);
-				return { arr: as[i].buf, n: Math.min(32, Math.round(paramVal(meta, 'uCount', 32))), kind: 'bubbles' };
-			}
+			if (as[i].feed === 'bubbles') bubbles = as[i];
+			if (as[i].feed === 'sceneBubbles4') scene4 = as[i];
+			if (as[i].feed === 'cageInside') cageInside = as[i];
+			if (as[i].feed === 'cageTop') cageTop = as[i];
+		}
+
+		const cageScene = paramVal(meta, 'uScene', -1) === 3;
+		const inside = cageInside || (cageScene ? (bubbles || scene4) : null);
+		if (inside && cageTop) {
+			const insideFeed = root.Feeds && root.Feeds[inside.feed];
+			const topFeed = root.Feeds && root.Feeds[cageTop.feed];
+			if (!insideFeed || !topFeed) return null;
+			insideFeed(time, meta, inside.buf);
+			topFeed(time, meta, cageTop.buf);
+			const countName = inside.feed === 'bubbles' || inside.feed === 'cageInside' ? 'uCount' : '';
+			const ni = countName ? Math.min(inside.count, Math.max(0, Math.round(paramVal(meta, countName, inside.count)))) : inside.count;
+			const nt = Math.min(cageTop.count, Math.max(0, Math.round(paramVal(meta, 'uTopCount', cageTop.count))));
+			for (let i = 0; i < ni * 4; i++) cagePick[i] = inside.buf[i];
+			for (let i = 0; i < nt * 4; i++) cagePick[ni * 4 + i] = cageTop.buf[i];
+			return { arr: cagePick, n: ni + nt, kind: 'cage', split: ni, insideKind: inside.feed };
+		}
+		const regular = bubbles || scene4;
+		if (regular) {
+			const feed = root.Feeds && root.Feeds[regular.feed];
+			if (!feed) return null;
+			feed(time, meta, regular.buf);
+			const n = regular.feed === 'bubbles'
+				? Math.min(regular.count, Math.round(paramVal(meta, 'uCount', regular.count)))
+				: regular.count;
+			return { arr: regular.buf, n, kind: regular.feed };
 		}
 		if (meta.fixed4) {
 			for (let i = 0; i < 4; i++) bubble4(i, time);
@@ -142,16 +169,35 @@
 		const s = Cam.selSrc;
 		const meta = runner && runner.current;
 		if (!s || !meta) return;
+		if (s.kind === 'cageTop' && meta.id !== 'cage' && paramVal(meta, 'uScene', -1) !== 3) {
+			clearSel();
+			return;
+		}
 		const time = (runner && runner.sceneTime !== undefined) ? runner.sceneTime : (runner.elapsed || 0);
 		let src = null, n = 0;
-		if (s.kind === 'bubbles') {
+		if (s.kind === 'bubbles' || s.kind === 'sceneBubbles4') {
 			const as = meta.arrays || [];
 			for (let i = 0; i < as.length; i++) {
-				if (as[i].feed === 'bubbles') {
-					src = as[i].buf;
-					n = Math.min(32, Math.round(paramVal(meta, 'uCount', 32)));
-					break;
-				}
+				if (as[i].feed !== s.kind) continue;
+				src = as[i].buf;
+				n = s.kind === 'bubbles'
+					? Math.min(as[i].count, Math.round(paramVal(meta, 'uCount', as[i].count)))
+					: as[i].count;
+				const feed = root.Feeds && root.Feeds[s.kind];
+				if (feed) feed(time, meta, src);
+				break;
+			}
+		} else if (s.kind === 'cageInside' || s.kind === 'cageTop') {
+			const feedName = s.kind;
+			const countName = s.kind === 'cageInside' ? 'uCount' : 'uTopCount';
+			const as = meta.arrays || [];
+			for (let i = 0; i < as.length; i++) {
+				if (as[i].feed !== feedName) continue;
+				src = as[i].buf;
+				n = Math.min(as[i].count, Math.max(0, Math.round(paramVal(meta, countName, as[i].count))));
+				const feed = root.Feeds && root.Feeds[feedName];
+				if (feed) feed(time, meta, src);
+				break;
 			}
 		} else {
 			for (let i = 0; i < 4; i++) bubble4(i, time);
@@ -187,7 +233,8 @@
 		const ry = (cssY - r.top) / r.height;
 		const minDim = Math.min(r.width, r.height);
 		const ux = (2.0 * rx - 1.0) * (r.width / minDim) * TAN30;
-		const uy = (2.0 * ry - 1.0) * (r.height / minDim) * TAN30;
+		// CSS pointer y grows downward; gl_FragCoord/camera UV y grows upward.
+		const uy = (1.0 - 2.0 * ry) * (r.height / minDim) * TAN30;
 		ray[0] = ux * rt[0] + uy * up[0] + fw[0];
 		ray[1] = ux * rt[1] + uy * up[1] + fw[1];
 		ray[2] = ux * rt[2] + uy * up[2] + fw[2];
@@ -212,7 +259,12 @@
 		if (bi >= 0) {
 			const j = bi * 4;
 			Cam.sel[0] = arr[j]; Cam.sel[1] = arr[j + 1]; Cam.sel[2] = arr[j + 2]; Cam.sel[3] = arr[j + 3];
-			Cam.selSrc = { kind: p.kind, idx: bi };
+			let kind = p.kind, idx = bi;
+			if (p.kind === 'cage') {
+				kind = bi < p.split ? p.insideKind : 'cageTop';
+				idx = bi < p.split ? bi : bi - p.split;
+			}
+			Cam.selSrc = { kind, idx };
 			Cam.target[0] = arr[j]; Cam.target[1] = arr[j + 1]; Cam.target[2] = arr[j + 2];
 		} else {
 			clearSel();

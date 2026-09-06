@@ -79,6 +79,51 @@
 	const C64 = makeCloud(64);
 	const C128 = makeCloud(128);
 
+	// Deterministic initial conditions for the cage scene. Positions are stored
+	// as fractions of each sphere's available half-extent; velocities are world
+	// units per second. The constants never change and the feeds below evaluate
+	// the exact reflected trajectory directly from time (no integration state).
+	function hash01(n) {
+		const x = Math.sin(n * 127.1 + 311.7) * 43758.5453123;
+		return x - Math.floor(x);
+	}
+
+	function makeCage(n) {
+		const px = new Float32Array(n);
+		const py = new Float32Array(n);
+		const pz = new Float32Array(n);
+		const vx = new Float32Array(n);
+		const vy = new Float32Array(n);
+		const vz = new Float32Array(n);
+		const rad = new Float32Array(n);
+		for (let i = 0; i < n; i++) {
+			const k = i + 1;
+			px[i] = Math.sin(GA * k * 1.13 + 0.4) * 0.68;
+			py[i] = Math.sin(GA * k * 1.71 + 2.1) * 0.68;
+			pz[i] = Math.cos(GA * k * 0.83 + 1.2) * 0.68;
+			rad[i] = 0.25 + 0.27 * hash01(k * 5.31);
+
+			// A uniformly distributed direction with an independently jittered
+			// speed avoids the diagonal/synchronised motion common to per-axis
+			// sign generators.
+			const az = Math.PI * 2.0 * hash01(k * 2.17);
+			const dz = hash01(k * 7.93) * 2.0 - 1.0;
+			const flat = Math.sqrt(Math.max(0.0, 1.0 - dz * dz));
+			const speed = 0.48 + 0.42 * hash01(k * 11.47);
+			vx[i] = Math.cos(az) * flat * speed;
+			vy[i] = dz * speed;
+			vz[i] = Math.sin(az) * flat * speed;
+		}
+		return { px, py, pz, vx, vy, vz, rad };
+	}
+
+	const CAGE_INSIDE = makeCage(61);
+	const CAGE_TOP_X = new Float32Array([-0.48, 0.34, 0.08]);
+	const CAGE_TOP_Z = new Float32Array([-0.26, -0.38, 0.43]);
+	const CAGE_TOP_R = new Float32Array([0.47, 0.36, 0.55]);
+	const CAGE_TOP_V = new Float32Array([3.05, 2.55, 3.35]);
+	const CAGE_TOP_PHASE = new Float32Array([0.04, 0.39, 0.73]);
+
 	// current value of a declared param, falling back to its default
 	function paramVal(meta, name, fallback) {
 		const ps = (meta && meta.params) || [];
@@ -154,9 +199,83 @@
 		}
 	}
 
-	Feeds.bubbles = function (time, meta, out) { feedCloud(C32, time, meta, out); };
+	Feeds.bubbles = function (time, meta, out) {
+		if (paramVal(meta, 'uScene', 0) === 3) { feedCageInside(time, meta, out); return; }
+		feedCloud(C32, time, meta, out);
+	};
 	Feeds.bubbles64 = function (time, meta, out) { feedCloud(C64, time, meta, out); };
 	Feeds.bubbles128 = function (time, meta, out) { feedCloud(C128, time, meta, out); };
+
+	// Triangle-wave fold of unbounded linear motion into [-bound, +bound].
+	// This is the closed form of a restitution-1 collision against two planes:
+	// the normal velocity flips at a wall and tangential velocity is unchanged.
+	function reflectedAxis(q, bound) {
+		const period = 4.0 * bound;
+		let s = (q + bound) % period;
+		if (s < 0.0) s += period;
+		return bound - Math.abs(s - 2.0 * bound);
+	}
+
+	function feedCageInside(time, meta, out) {
+		const n = Math.min(CAGE_INSIDE.rad.length, out.length >> 2);
+		const cage = Math.max(0.2, paramVal(meta, 'uCageSize', 2.2));
+		const size = Math.max(0.05, paramVal(meta, 'uSize', 1.0));
+		for (let i = 0; i < n; i++) {
+			const radius = CAGE_INSIDE.rad[i] * size;
+			const bound = Math.max(0.05, cage - radius);
+			const j = i * 4;
+			out[j] = reflectedAxis(CAGE_INSIDE.px[i] * bound + CAGE_INSIDE.vx[i] * time, bound);
+			out[j + 1] = reflectedAxis(CAGE_INSIDE.py[i] * bound + CAGE_INSIDE.vy[i] * time, bound);
+			out[j + 2] = reflectedAxis(CAGE_INSIDE.pz[i] * bound + CAGE_INSIDE.vz[i] * time, bound);
+			out[j + 3] = radius;
+		}
+	}
+
+	Feeds.cageInside = feedCageInside;
+
+	// Four-sphere material renderers use this feed in place of their old GLSL
+	// animation. It preserves that animation in normal scenes, but switches to
+	// the same reflected AABB trajectories when the cage scene is selected.
+	Feeds.sceneBubbles4 = function (time, meta, out) {
+		if (paramVal(meta, 'uScene', 0) === 3) { feedCageInside(time, meta, out); return; }
+		out[0] = 0.4 * Math.sin(time * 0.50);
+		out[1] = 0.6 * Math.sin(time * 0.90);
+		out[2] = 0.0; out[3] = 1.4;
+		out[4] = 2.0 * Math.cos(time * 0.40);
+		out[5] = -0.4 + 0.3 * Math.sin(time);
+		out[6] = 0.5 * Math.sin(time * 0.6); out[7] = 1.1;
+		out[8] = -1.8 + 0.5 * Math.sin(time * 0.70);
+		out[9] = 0.2 * Math.cos(time * 0.80);
+		out[10] = -0.6; out[11] = 1.0;
+		out[12] = 0.4 * Math.sin(time * 0.30);
+		out[13] = 1.3 * Math.cos(time * 0.40);
+		out[14] = 1.2; out[15] = 0.9;
+	};
+
+	// The outer balls have zero initial horizontal velocity. With no friction
+	// they therefore stay over fixed points on the top face while their vertical
+	// trajectories repeat the exact parabola y = v*t - g*t^2/2. The sphere's
+	// bottom, not its centre, contacts the face at y = cage.
+	Feeds.cageTop = function (time, meta, out) {
+		const n = Math.min(CAGE_TOP_R.length, out.length >> 2);
+		const cage = Math.max(0.2, paramVal(meta, 'uCageSize', 2.2));
+		const size = Math.max(0.05, paramVal(meta, 'uSize', 1.0));
+		const gravity = Math.max(0.05, paramVal(meta, 'uGravity', 4.75));
+		for (let i = 0; i < n; i++) {
+			const radius = CAGE_TOP_R[i] * size;
+			const room = Math.max(0.0, cage - radius);
+			const launch = CAGE_TOP_V[i];
+			const period = 2.0 * launch / gravity;
+			const shifted = time + CAGE_TOP_PHASE[i] * period;
+			const phase = shifted - Math.floor(shifted / period) * period;
+			const height = Math.max(0.0, launch * phase - 0.5 * gravity * phase * phase);
+			const j = i * 4;
+			out[j] = CAGE_TOP_X[i] * room;
+			out[j + 1] = cage + radius + height;
+			out[j + 2] = CAGE_TOP_Z[i] * room;
+			out[j + 3] = radius;
+		}
+	};
 
 	root.Feeds = Feeds;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -8,7 +8,10 @@ window.SHADER_thick_raymarch = {
 	"id": "thick_raymarch",
 	"title": "solid glass bubbles - raymarched sdf, 2 bounces (4)",
 	"channels": { "0": "env_cube", "1": "env_cube", "2": "noise", "3": "noise" },
-	"fixed4": true,
+	"arrays": [
+		{ "name": "uBubbles", "type": "vec4", "count": 4, "feed": "sceneBubbles4" },
+		{ "name": "uTop", "type": "vec4", "count": 3, "feed": "cageTop" }
+	],
 	"vars": [
 		{ "name": "uCamPos", "type": "vec3", "feed": "camPos" },
 		{ "name": "uCamRt", "type": "vec3", "feed": "camRt" },
@@ -20,14 +23,22 @@ window.SHADER_thick_raymarch = {
 		{ "name": "uScene", "type": "int", "label": "scene", "def": 0, "hint": "interior behind the bubbles", "options": [
 			{ "value": 0, "label": "checker land" },
 			{ "value": 1, "label": "rainbow" },
-			{ "value": 2, "label": "color box" }
-		] }
+			{ "value": 2, "label": "color box" },
+			{ "value": 3, "label": "cage" }
+		] },
+		{ "name": "uTopCount", "type": "int", "label": "on top", "min": 0, "max": 3, "step": 1, "def": 3, "hint": "balls above the cage" },
+		{ "name": "uCageSize", "type": "float", "label": "cage", "min": 2.0, "max": 4.5, "step": 0.1, "def": 2.2, "hint": "cube half-size" },
+		{ "name": "uSize", "type": "float", "label": "size", "min": 0.8, "max": 2.4, "step": 0.05, "def": 1.7, "hint": "inside and top sphere scale in the cage scene" },
+		{ "name": "uWireWidth", "type": "float", "label": "wire", "min": 0.008, "max": 0.08, "step": 0.002, "def": 0.026, "hint": "cage line thickness" },
+		{ "name": "uGravity", "type": "float", "label": "gravity", "min": 2.5, "max": 10.0, "step": 0.25, "def": 4.75, "hint": "top-ball gravity" }
 	],
 	"source":
 `${GLSL.common}
+${GLSL.raySphere}
 ${GLSL.camera}
 ${GLSL.bubbles4}
 ${GLSL.env}
+${GLSL.cageOverlay}
 ${GLSL.selGlow}
 
 #define MAXSTEPS 64
@@ -46,8 +57,7 @@ float sminK (float a, float b, float k, out float m) {
 
 // x = distance, y = material id (0..3, fractional where bubbles merge)
 vec2 map (vec3 p) {
-	float t = iTime;
-	vec4 s0 = bubble (0, t), s1 = bubble (1, t), s2 = bubble (2, t), s3 = bubble (3, t);
+	vec4 s0 = uBubbles[0], s1 = uBubbles[1], s2 = uBubbles[2], s3 = uBubbles[3];
 	float d0 = length (p - s0.xyz) - s0.w;
 	float d1 = length (p - s1.xyz) - s1.w;
 	float d2 = length (p - s2.xyz) - s2.w;
@@ -132,6 +142,7 @@ vec3 shadeHit (inout vec3 ro, inout vec3 rd, out float refl, out bool hit) {
 void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 	vec3 ro, rd;
 	camera (fragCoord, ro, rd);
+	vec3 viewRo = ro, viewRd = rd;
 
 	float refl;
 	bool hit;
@@ -143,7 +154,8 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 		col += c * filt;
 		filt *= refl;
 	}
-	col += selGlow (ro, rd);
+	col = cageOverlay (col, viewRo, viewRd);
+	col += selGlow (viewRo, viewRd);
 
 	fragColor = vec4 (tonemap (col), 1.0);
 }

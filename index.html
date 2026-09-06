@@ -67,7 +67,7 @@
 		<span style="flex:1"></span>
 		<button id="cam" title="camera auto-orbit: 'auto' orbits until you move the camera (drag, wheel, pinch), then turns off; 'on' always orbits; 'off' never orbits">cam: auto</button>
 		<button id="mov" title="sphere animation: 'on' advances the feed time that drives bubble motion; 'off' freezes the spheres in place (camera and visual effects keep moving)">mov: on</button>
-		<button id="aa" title="SMAA 1x post-process antialiasing (auto-off above 2K)">aa: on</button></oldString>
+		<button id="aa" title="SMAA 1x post-process antialiasing (auto-off above 2K)">aa: on</button>
 		<label id="music-wrap" class="off" title="play the shader's procedural music"><input type="checkbox" id="music" disabled> music</label>
 		<button id="bench" title="benchmark the multi-bubble shaders on the same 16-128 bubble scene at up to 4K; GPU ms is measured with EXT_disjoint_timer_query_webgl2 when available, otherwise via gl.finish(), so display refresh limits don't skew it">benchmark</button>
 		<button id="copy-prompt" title="copy a prompt asking an LLM to implement a shader like the currently selected one (tech description + GitHub link)">copy prompt</button>
@@ -92,6 +92,7 @@
 	<script src="shaders/ld3SDl.js"></script>
 	<script src="shaders/multi_fresnel.js"></script>
 	<script src="shaders/multi_thinfilm.js"></script>
+	<script src="shaders/cage.js"></script>
 	<script src="shaders/thick_glass.js"></script>
 	<script src="shaders/thick_analytic.js"></script>
 	<script src="shaders/bench_fresnel.js"></script>
