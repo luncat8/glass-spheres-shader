@@ -128,6 +128,8 @@ void main() {
 		channelIsCube: [false, false, false, false], // per-shader
 		uniformLocs: null,
 		current: null, // { id, title, ... }
+		variantKey: '',
+		variants: Object.create(null), // compiled base/terrain/shape variants for current shader
 		running: false,
 		startTime: 0,
 		lastTime: 0,
@@ -267,14 +269,14 @@ void main() {
 		const sh = gl.createShader(type);
 		gl.shaderSource(sh, src);
 		gl.compileShader(sh);
+		const ok = gl.getShaderParameter(sh, gl.COMPILE_STATUS);
 		const dt = (typeof performance !== 'undefined' && performance.now) ? (performance.now() - t0) : 0;
 		if (dt > 100) {
-			try { console.log('[Runner] '+label+' compile took '+dt.toFixed(1)+'ms len='+src.length+' lines='+src.split('\n').length); } catch(e){}
+			try { console.log('[Runner] '+label+' compile/status took '+dt.toFixed(1)+'ms len='+src.length+' lines='+src.split('\n').length); } catch(e){}
 		}
-		if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+		if (!ok) {
 			const log = gl.getShaderInfoLog(sh);
 			gl.deleteShader(sh);
-			// include timing in error for debug
 			throw new Error('shader compile failed ('+label+' '+dt.toFixed(1)+'ms):\n' + log + '\n--- source ---\n' + src.slice(0, 4000));
 		}
 		return sh;
@@ -285,23 +287,13 @@ void main() {
 		const prog = gl.createProgram();
 		gl.attachShader(prog, vs);
 		gl.attachShader(prog, fs);
-		// KHR_parallel_shader_compile lets the driver compile in background;
-		// we still have to block here, but at least we can log if it was slow
-		// and the extension is present.
 		gl.linkProgram(prog);
-		// If the parallel extension is available, poll completion to avoid
-		// blocking the main thread too long on some drivers (best-effort).
-		const ext = gl.getExtension('KHR_parallel_shader_compile');
-		if (ext) {
-			// Some drivers compile async; wait a bit with a non-blocking loop
-			// that still yields to the event loop via a short timeout is not
-			// possible here (sync API), but we can at least detect slow path.
-		}
+		const ok = gl.getProgramParameter(prog, gl.LINK_STATUS);
 		const dt = (typeof performance !== 'undefined' && performance.now) ? (performance.now() - t0) : 0;
 		if (dt > 100) {
-			try { console.log('[Runner] program link took '+dt.toFixed(1)+'ms'); } catch(e){}
+			try { console.log('[Runner] program link/status took '+dt.toFixed(1)+'ms'); } catch(e){}
 		}
-		if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+		if (!ok) {
 			const log = gl.getProgramInfoLog(prog);
 			gl.deleteProgram(prog);
 			throw new Error('program link failed ('+dt.toFixed(1)+'ms):\n' + log);
@@ -465,25 +457,90 @@ void main() {
 		return root.Runner;
 	}
 
+	function paramValue(meta, name, fallback) {
+		const ps = (meta && meta.params) || [];
+		for (let i = 0; i < ps.length; i++) {
+			if (ps[i].name !== name) continue;
+			const v = ps[i].value !== undefined ? ps[i].value : ps[i].def;
+			return typeof v === 'number' && isFinite(v) ? v : fallback;
+		}
+		return fallback;
+	}
+
+	// Terrain and shape code are compile-time variants. The normal startup
+	// program therefore does not make the driver optimise the terrain marcher,
+	// cube, tetra and knot implementations just to render spheres over a sky.
+	function variantOf(meta) {
+		const terrain = paramValue(meta, 'uScene', 0) === 4 ? 1 : 0;
+		const shape = Math.max(0, Math.min(3, paramValue(meta, 'uShape', 0) | 0));
+		return { terrain: terrain, shape: shape, key: terrain + ':' + shape };
+	}
+
+	function variantSource(meta, variant) {
+		const flags = resolveChannelKinds(meta.source, meta.channels);
+		const header = buildFSHeader(meta.source, flags) + buildUniformDecls(meta);
+		return header + '#define USE_TERRAIN ' + variant.terrain + '\n#define SHAPE_MODE ' + variant.shape + '\n' + meta.source + FS_FOOTER;
+	}
+
+	function disposeVariants(variants) {
+		const keys = Object.keys(variants);
+		for (let i = 0; i < keys.length; i++) {
+			const item = variants[keys[i]];
+			if (item && item.program) Runner.gl.deleteProgram(item.program);
+		}
+	}
+
+	function compileProgram(meta, variant) {
+		const gl = Runner.gl;
+		const src = variantSource(meta, variant);
+		let vs = null, fs = null, program = null;
+		try {
+			vs = compile(gl, gl.VERTEX_SHADER, VS);
+			fs = compile(gl, gl.FRAGMENT_SHADER, src);
+			program = link(gl, vs, fs);
+			return { program: program, locs: getUniformLocs(gl, program, meta), srcLen: src.length };
+		} catch (e) {
+			if (program) gl.deleteProgram(program);
+			throw e;
+		} finally {
+			if (vs) gl.deleteShader(vs);
+			if (fs) gl.deleteShader(fs);
+		}
+	}
+
+	function activateVariant(meta, key, item) {
+		Runner.program = item.program;
+		Runner.uniformLocs = item.locs;
+		Runner.variantKey = key;
+	}
+
 	function select(id) {
 		const tSel0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
 		const list = window.SHADERS || [];
 		let meta = null;
 		for (let i = 0; i < list.length; i++) if (list[i].id === id) { meta = list[i]; break; }
 		if (!meta) throw new Error('unknown shader id: ' + id);
-		const gl = Runner.gl;
+		const variant = variantOf(meta);
 		const flags = resolveChannelKinds(meta.source, meta.channels);
+		const oldFlags = Runner.channelIsCube.slice();
 		for (let i = 0; i < 4; i++) Runner.channelIsCube[i] = flags[i];
-		const header = buildFSHeader(meta.source, flags) + buildUniformDecls(meta);
-		const src = header + meta.source + FS_FOOTER;
-		const vs = compile(gl, gl.VERTEX_SHADER, VS);
-		const fs = compile(gl, gl.FRAGMENT_SHADER, src);
-		const prog = link(gl, vs, fs);
-		gl.deleteShader(vs);
-		gl.deleteShader(fs);
-		if (Runner.program) gl.deleteProgram(Runner.program);
-		Runner.program = prog;
-		Runner.uniformLocs = getUniformLocs(gl, prog, meta);
+		// Do not delete the old program until the new one has linked. A failed
+		// compile must leave the last working shader usable instead of poisoning
+		// every following selection on browsers that reset a WebGL compiler.
+		const oldVariants = Runner.variants;
+		const nextVariants = Object.create(null);
+		let item;
+		try {
+			item = compileProgram(meta, variant);
+		} catch (e) {
+			Runner.variants = oldVariants;
+			for (let i = 0; i < 4; i++) Runner.channelIsCube[i] = oldFlags[i];
+			throw e;
+		}
+		disposeVariants(oldVariants);
+		Runner.variants = nextVariants;
+		Runner.variants[variant.key] = item;
+		activateVariant(meta, variant.key, item);
 		prepareParams(meta);
 		prepareArrays(meta);
 		prepareVars(meta);
@@ -496,9 +553,23 @@ void main() {
 		const tSel1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
 		const dt = tSel1 - tSel0;
 		if (dt > 100) {
-			try { console.log('[Runner] select('+id+') total ' + dt.toFixed(1) + 'ms srcLen=' + src.length); } catch(e){}
+			try { console.log('[Runner] select('+id+') total ' + dt.toFixed(1) + 'ms srcLen=' + item.srcLen + ' variant=' + variant.key); } catch(e){}
 		}
 		return meta;
+	}
+
+	// Called after the scene or shape toolbar changes. User-selected variants
+	// compile on demand; switching back reuses the already linked program.
+	function setVariant() {
+		if (!Runner.current) return;
+		const variant = variantOf(Runner.current);
+		if (variant.key === Runner.variantKey) return;
+		let item = Runner.variants[variant.key];
+		if (!item) {
+			item = compileProgram(Runner.current, variant);
+			Runner.variants[variant.key] = item;
+		}
+		activateVariant(Runner.current, variant.key, item);
 	}
 
 	function bindChannel(gl, prog, locs, idx) {
@@ -661,7 +732,7 @@ void main() {
 	function setMov(on) { Runner.mov = !!on; }
 	function getMov() { return Runner.mov; }
 
-	const api = { init, select, run, stop, stats, setAA, getAA, setMov, getMov, mouse: Runner.mouse };
+	const api = { init, select, setVariant, run, stop, stats, setAA, getAA, setMov, getMov, mouse: Runner.mouse };
 	api.onAAChangeSetter = (f) => { Runner.onAAChange = f; };
 	api.helpers = { VS, FS_FOOTER, buildFSHeader, buildUniformDecls, resolveChannelKinds, detectCubeChannels };
 	Object.defineProperty(api, 'current', { get: () => Runner.current });

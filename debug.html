@@ -45,54 +45,67 @@ const statusEl = document.getElementById('status');
 function log(s){ logEl.textContent += s + '\n'; console.log(s); }
 function clearLog(){ logEl.textContent=''; }
 
-function compileOne(gl, meta){
+function compileOne(gl, meta, terrain, shape){
   const helpers = window.Runner.helpers;
   const flags = helpers.resolveChannelKinds(meta.source, meta.channels);
   const header = helpers.buildFSHeader(meta.source, flags) + helpers.buildUniformDecls(meta);
-  const src = header + meta.source + helpers.FS_FOOTER;
-  const vsSrc = helpers.VS;
-  let t0 = performance.now();
-  let vs, fs, prog, vsTime, fsTime, linkTime, ok=true, err='';
-  try{
+  const useTerrain = terrain ? 1 : 0;
+  const shapeMode = shape === undefined ? 0 : shape;
+  const src = header + '#define USE_TERRAIN ' + useTerrain + '\n#define SHAPE_MODE ' + shapeMode + '\n' + meta.source + helpers.FS_FOOTER;
+  const t0 = performance.now();
+  let vs = null, fs = null, prog = null;
+  let vsTime = 0, fsTime = 0, linkTime = 0, ok = true, err = '';
+  try {
+    let t = performance.now();
     vs = gl.createShader(gl.VERTEX_SHADER);
-    gl.shaderSource(vs, vsSrc);
+    gl.shaderSource(vs, helpers.VS);
     gl.compileShader(vs);
-    vsTime = performance.now()-t0;
-    if(!gl.getShaderParameter(vs, gl.COMPILE_STATUS)){
-      err += 'VS compile failed: '+gl.getShaderInfoLog(vs)+'\n';
-      ok=false;
+    vsTime = performance.now() - t;
+    if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+      err = 'VS compile failed: ' + gl.getShaderInfoLog(vs);
+      ok = false;
+      return result();
     }
-    let t1 = performance.now();
+
+    t = performance.now();
     fs = gl.createShader(gl.FRAGMENT_SHADER);
     gl.shaderSource(fs, src);
     gl.compileShader(fs);
-    fsTime = performance.now()-t1;
-    if(!gl.getShaderParameter(fs, gl.COMPILE_STATUS)){
-      err += 'FS compile failed: '+gl.getShaderInfoLog(fs)+'\n';
-      err += '--- source length '+src.length+' lines '+src.split('\n').length+'\n';
-      // dump first 500 chars of log already
-      ok=false;
+    if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+      fsTime = performance.now() - t;
+      err = 'FS compile failed: ' + gl.getShaderInfoLog(fs) + '\n--- source length ' + src.length + ' lines ' + src.split('\n').length;
+      ok = false;
+      return result();
     }
-    let t2 = performance.now();
+    fsTime = performance.now() - t;
+
+    t = performance.now();
     prog = gl.createProgram();
     gl.attachShader(prog, vs);
     gl.attachShader(prog, fs);
     gl.linkProgram(prog);
-    linkTime = performance.now()-t2;
-    if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){
-      err += 'LINK failed: '+gl.getProgramInfoLog(prog)+'\n';
-      ok=false;
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      linkTime = performance.now() - t;
+      err = 'LINK failed: ' + gl.getProgramInfoLog(prog);
+      ok = false;
+      return result();
     }
-    // cleanup
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    gl.deleteProgram(prog);
-  }catch(e){
-    err += 'exception: '+e.message+'\n'+e.stack+'\n';
-    ok=false;
+    linkTime = performance.now() - t;
+  } catch (e) {
+    err = 'exception: ' + e.message + '\n' + e.stack;
+    ok = false;
+  } finally {
+    if (vs) gl.deleteShader(vs);
+    if (fs) gl.deleteShader(fs);
+    if (prog) gl.deleteProgram(prog);
   }
-  const total = performance.now()-t0;
-  return {id:meta.id, ok, vsTime, fsTime, linkTime, total, err, srcLen:src.length, lines:src.split('\n').length};
+  return result();
+
+  function result(){
+    return {id: meta.id, ok: ok, vsTime: vsTime, fsTime: fsTime, linkTime: linkTime,
+      total: performance.now() - t0, err: err, srcLen: src.length, lines: src.split('\n').length,
+      terrain: !!terrain, shape: shapeMode};
+  }
 }
 
 function runAll(){
@@ -116,6 +129,7 @@ function runAll(){
     log('['+meta.id+'] srcLen='+r.srcLen+' lines='+r.lines+' total='+(r.total|0)+'ms vs='+ (r.vsTime|0)+' fs='+ (r.fsTime|0)+' link='+(r.linkTime|0)+' ok='+r.ok);
     if(!r.ok){
       log('  ERROR:\n'+r.err.slice(0,2000));
+      if (gl.isContextLost && gl.isContextLost()) { log('  WebGL context lost; stopping.'); break; }
     }
   }
   statusEl.textContent='done';
@@ -142,7 +156,10 @@ function runSeq(){
     const r=compileOne(gl, meta);
     const dt=performance.now()-t0;
     log('['+meta.id+'] '+(dt|0)+'ms ok='+r.ok+' fs='+(r.fsTime|0)+' link='+(r.linkTime|0));
-    if(!r.ok) log('  '+r.err.slice(0,2000));
+    if(!r.ok) {
+      log('  '+r.err.slice(0,2000));
+      if (gl.isContextLost && gl.isContextLost()) { log('  WebGL context lost; stopping.'); break; }
+    }
   }
   statusEl.textContent='done';
 }

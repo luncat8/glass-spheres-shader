@@ -78,8 +78,10 @@ vec3 tonemap (vec3 c) {
 #define KNOT_LIP ${lit(SHAPE.KNOT_LIP)}
 #define KNOT_HULL ${lit(SHAPE.KNOT_HULL)}
 
-// Rodrigues rotation from (unit axis, angle). World -> local is \`v * m\`,
-// local -> world is \`m * v\`.
+// SHAPE_MODE is a compile-time variant. Keeping the selected shape only in
+// the active program avoids making every ray carry the cube, tetra and knot
+// implementations through the driver's optimizer.
+#if SHAPE_MODE != SHAPE_SPHERE
 mat3 spinMat (vec4 s) {
 	vec3 a = s.xyz;
 	float c = cos (s.w), si = sin (s.w), k = 1.0 - c;
@@ -88,23 +90,27 @@ mat3 spinMat (vec4 s) {
 		a.x * a.y * k - a.z * si, c + a.y * a.y * k,        a.z * a.y * k + a.x * si,
 		a.x * a.z * k + a.y * si, a.y * a.z * k - a.x * si, c + a.z * a.z * k);
 }
+#endif
 
+#if SHAPE_MODE == SHAPE_CUBE
 float sdBox (vec3 p, vec3 b) {
 	vec3 q = abs (p) - b;
 	return length (max (q, 0.0)) + min (max (q.x, max (q.y, q.z)), 0.0);
 }
+#endif
 
+#if SHAPE_MODE == SHAPE_TETRA
 // regular tetrahedron: exact at the faces, a lower bound near edges and vertices
 float sdTetra (vec3 p, float inradius) {
 	float d = max (max (dot (p, TETRA_N0), dot (p, TETRA_N1)), max (dot (p, TETRA_N2), dot (p, TETRA_N3)));
 	return d - inradius;
 }
+#endif
 
+#if SHAPE_MODE == SHAPE_KNOT
 // (2,3) torus knot around y inside the unit ball. The knot crosses every
 // meridian half-plane exactly twice, at +e and -e; the distance to each strand
-// is measured normal to its tangent there. That estimate is not Lipschitz-1
-// near the hole, so it is scaled by KNOT_LIP, and the exact torus hull keeps
-// the steps big in empty space (measured safe: no overstep, see plan 0.4.3).
+// is measured normal to its tangent there.
 float sdKnot (vec3 p) {
 	vec2 m = vec2 (length (p.xz) - KNOT_R, p.y);
 	float u = 1.5 * atan (p.z, p.x);
@@ -117,7 +123,9 @@ float sdKnot (vec3 p) {
 	float d2 = length (o2 - t2 * dot (o2, t2));
 	return max (KNOT_LIP * (min (d1, d2) - KNOT_TUBE), length (m) - KNOT_HULL);
 }
+#endif
 
+#if SHAPE_MODE == SHAPE_CUBE || SHAPE_MODE == SHAPE_TETRA
 // clip the ray span [t.x, t.y] against the half-space dot (p, n) <= d,
 // remembering which plane bounds each end
 void planeClip (vec3 ro, vec3 rd, vec3 n, float d, inout vec2 t, inout vec3 nEnter, inout vec3 nExit) {
@@ -128,8 +136,10 @@ void planeClip (vec3 ro, vec3 rd, vec3 n, float d, inout vec2 t, inout vec3 nEnt
 	if (den < 0.0) { if (tp > t.x) { t.x = tp; nEnter = n; } return; }
 	if (tp < t.y) { t.y = tp; nExit = n; }
 }
+#endif
 
-// axis-aligned box: vec2 (t_enter, t_exit), miss when y < x, outward normals
+// axis-aligned box used by the optional terrain module. It stays available in
+// every shape variant because the land block is independent of object shape.
 vec2 boxHit (vec3 ro, vec3 rd, vec3 c, vec3 h, out vec3 nEnter, out vec3 nExit) {
 	vec3 m = 1.0 / rd;
 	vec3 n = m * (ro - c);
@@ -145,40 +155,53 @@ vec2 shapeHit (int shape, vec3 ro, vec3 rd, vec4 obj, vec4 spin, out vec3 nEnter
 	vec2 t = ray_sphere (ro, rd, obj.xyz, obj.w);
 	nEnter = normalize (ro + rd * t.x - obj.xyz);
 	nExit = normalize (ro + rd * t.y - obj.xyz);
-	// the ball is the shape for the sphere and the pick/halo proxy of the knot;
-	// for the polytopes it is the pre-test that bounds the clipped span
-	if (t.y < t.x || shape == SHAPE_SPHERE || shape == SHAPE_KNOT) return t;
+	if (t.y < t.x) return t;
+#if SHAPE_MODE == SHAPE_SPHERE || SHAPE_MODE == SHAPE_KNOT
+	return t;
+#elif SHAPE_MODE == SHAPE_CUBE
 	mat3 rot = spinMat (spin);
 	vec3 lo = (ro - obj.xyz) * rot;
 	vec3 ld = rd * rot;
 	vec3 nA = nEnter * rot, nB = nExit * rot;
-	if (shape == SHAPE_CUBE) {
-		float h = obj.w * CUBE_INSCRIBE;
-		planeClip (lo, ld, vec3 (1.0, 0.0, 0.0), h, t, nA, nB);
-		planeClip (lo, ld, vec3 (-1.0, 0.0, 0.0), h, t, nA, nB);
-		planeClip (lo, ld, vec3 (0.0, 1.0, 0.0), h, t, nA, nB);
-		planeClip (lo, ld, vec3 (0.0, -1.0, 0.0), h, t, nA, nB);
-		planeClip (lo, ld, vec3 (0.0, 0.0, 1.0), h, t, nA, nB);
-		planeClip (lo, ld, vec3 (0.0, 0.0, -1.0), h, t, nA, nB);
-	} else {
-		float h = obj.w * TETRA_INRADIUS;
-		planeClip (lo, ld, TETRA_N0, h, t, nA, nB);
-		planeClip (lo, ld, TETRA_N1, h, t, nA, nB);
-		planeClip (lo, ld, TETRA_N2, h, t, nA, nB);
-		planeClip (lo, ld, TETRA_N3, h, t, nA, nB);
-	}
+	float h = obj.w * CUBE_INSCRIBE;
+	planeClip (lo, ld, vec3 (1.0, 0.0, 0.0), h, t, nA, nB);
+	planeClip (lo, ld, vec3 (-1.0, 0.0, 0.0), h, t, nA, nB);
+	planeClip (lo, ld, vec3 (0.0, 1.0, 0.0), h, t, nA, nB);
+	planeClip (lo, ld, vec3 (0.0, -1.0, 0.0), h, t, nA, nB);
+	planeClip (lo, ld, vec3 (0.0, 0.0, 1.0), h, t, nA, nB);
+	planeClip (lo, ld, vec3 (0.0, 0.0, -1.0), h, t, nA, nB);
 	nEnter = rot * nA;
 	nExit = rot * nB;
 	return t;
+#else
+	mat3 rot = spinMat (spin);
+	vec3 lo = (ro - obj.xyz) * rot;
+	vec3 ld = rd * rot;
+	vec3 nA = nEnter * rot, nB = nExit * rot;
+	float h = obj.w * TETRA_INRADIUS;
+	planeClip (lo, ld, TETRA_N0, h, t, nA, nB);
+	planeClip (lo, ld, TETRA_N1, h, t, nA, nB);
+	planeClip (lo, ld, TETRA_N2, h, t, nA, nB);
+	planeClip (lo, ld, TETRA_N3, h, t, nA, nB);
+	nEnter = rot * nA;
+	nExit = rot * nB;
+	return t;
+#endif
 }
 
 float shapeSdf (int shape, vec3 p, vec4 obj, vec4 spin) {
-	vec3 q = p - obj.xyz;
-	if (shape == SHAPE_SPHERE) return length (q) - obj.w;
-	q = q * spinMat (spin);
-	if (shape == SHAPE_CUBE) return sdBox (q, vec3 (obj.w * CUBE_INSCRIBE));
-	if (shape == SHAPE_TETRA) return sdTetra (q, obj.w * TETRA_INRADIUS);
+#if SHAPE_MODE == SHAPE_SPHERE
+	return length (p - obj.xyz) - obj.w;
+#else
+	vec3 q = (p - obj.xyz) * spinMat (spin);
+#if SHAPE_MODE == SHAPE_CUBE
+	return sdBox (q, vec3 (obj.w * CUBE_INSCRIBE));
+#elif SHAPE_MODE == SHAPE_TETRA
+	return sdTetra (q, obj.w * TETRA_INRADIUS);
+#else
 	return sdKnot (q / obj.w) * obj.w;
+#endif
+#endif
 }
 `;
 
@@ -446,7 +469,8 @@ vec3 cageOverlay (vec3 behind, vec3 ro, vec3 rd) {
 	// 2D simplex gradient noise (Ashima Arts / Stefan Gustavson, MIT) and a
 	// three-octave fbm. Procedural, no texture, |fbm3| <= 1 by construction —
 	// the motion feed of the terrain scene relies on that bound.
-	GLSL.simplex = `vec3 mod289 (vec3 x) { return x - floor (x * (1.0 / 289.0)) * 289.0; }
+	GLSL.simplex = `#if USE_TERRAIN
+vec3 mod289 (vec3 x) { return x - floor (x * (1.0 / 289.0)) * 289.0; }
 vec2 mod289 (vec2 x) { return x - floor (x * (1.0 / 289.0)) * 289.0; }
 vec3 permute (vec3 x) { return mod289 (((x * 34.0) + 10.0) * x); }
 
@@ -484,6 +508,7 @@ float fbm3 (vec2 p, float drift) {
 	a += 0.25 * snoise (p + vec2 (drift));
 	return a / 1.75;
 }
+#endif
 `;
 
 	// The terrain scene (uScene == 4): a block whose top face is a simplex
@@ -494,7 +519,8 @@ float fbm3 (vec2 p, float drift) {
 	// LAND_MAX_STEPS was 96 — reduced to 64 after reports of very slow first
 	// compile (driver shader cache makes later runs fast). The param still
 	// offers 32/64, 96 would force a 96-unroll that some drivers choke on.
-	GLSL.land = `#define LAND_SKIRT 1.0
+	GLSL.land = `#if USE_TERRAIN
+#define LAND_SKIRT 1.0
 #define LAND_IOR 1.45
 #define WATER_IOR 1.33
 #define LAND_TINT vec3 (0.16, 0.05, 0.09)
@@ -652,6 +678,17 @@ vec3 landOverlay (vec3 behind, vec3 ro, vec3 rd, float objT) {
 	if (id < 0 || t >= objT) return behind;
 	return landShade (ro, rd, t, n, id);
 }
+#else
+// Non-terrain programs keep these small no-op entry points. The terrain
+// implementation is preprocessed out before the driver sees its large loops.
+void landHit (vec3 ro, vec3 rd, out float t, out vec3 n, out int id) {
+	t = -1.0;
+	n = vec3 (0.0, 1.0, 0.0);
+	id = -1;
+}
+vec3 landShade (vec3 ro, vec3 rd, float t, vec3 n, int id) { return vec3 (0.0); }
+vec3 landOverlay (vec3 behind, vec3 ro, vec3 rd, float objT) { return behind; }
+#endif
 `;
 
 	// the uniforms GLSL.land reads, declared once; each scene-aware shader

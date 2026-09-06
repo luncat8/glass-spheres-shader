@@ -426,10 +426,9 @@
 		}
 	}
 
-	// Switching the scene or the shape never recompiles: the shader already
-	// declares the hidden `uScene` / `uShape` uniforms and its feeds are
-	// scene-aware, so only the param value, the visible sliders and the
-	// selection need refreshing.
+	// Scene and shape are compile-time variants. The cheap sphere/sky program
+	// is what starts immediately; the larger terrain or raymarched shape program
+	// is compiled only when the user asks for it, then cached for this shader.
 	function pickEntry(ax, id) {
 		const meta = runner && runner.current;
 		if (!meta) return;
@@ -445,8 +444,19 @@
 			return;
 		}
 		if (ax.cur === id) return;
+		const previous = ax.cur;
 		setCur(ax, id, meta);
 		ax.reg.apply(meta, id);
+		try {
+			runner.setVariant();
+		} catch (err) {
+			// Keep the last linked program active if an optional variant is not
+			// supported by this driver. The failed program is cleaned up by Runner.
+			ax.reg.apply(meta, previous);
+			setCur(ax, previous, meta);
+			setErr(String(err.message || err));
+			return;
+		}
 		buildParams(meta);
 		refreshSelectors();
 		setNote('');
