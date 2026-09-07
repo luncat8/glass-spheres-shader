@@ -45,6 +45,10 @@
 			tech: 'Original Shadertoy: one refractive sphere with an analytic ray-sphere hit, fbm-hued surface lookup and fresnel-step reflection; orbit camera driven by iMouse.',
 			file: 'XdXXzB.js',
 		},
+		XdVSRV: {
+			tech: 'Original Shadertoy: a single glass-gold bubble — analytic shell traced with bump-mapped normals, two-lamp + ambient shading and up to 7 refraction/reflection hops against the gold pattern and env-cube sky.',
+			file: 'XdVSRV.js',
+		},
 		ld3SDl: {
 			tech: 'Original Shadertoy: raymarched single warped sphere with 6-wavelength thin-film interference, iq-style cube lookup and filmic resample to RGB.',
 			file: 'ld3SDl.js',

@@ -7,11 +7,25 @@ window.SHADER_XdXXzB = {
   "scenes": ["own"],
   "group": "orig",
   "url": "https://www.shadertoy.com/view/XdXXzB",
+  "camDist": 5.0,
+  "camPitch": 0.0,
   "channels": {"0":"env_cube","1":"env_cube","2":"noise","3":"noise"},
+  "vars": [
+    { "name": "uCamPos", "type": "vec3", "feed": "camPos" },
+    { "name": "uCamRt", "type": "vec3", "feed": "camRt" },
+    { "name": "uCamUp", "type": "vec3", "feed": "camUp" },
+    { "name": "uCamFw", "type": "vec3", "feed": "camFw" }
+  ],
+  "params": [
+    { "name": "uFov", "type": "float", "label": "fov", "group": "camera", "min": 30, "max": 110, "step": 0.5, "def": 60.0, "hint": "vertical field of view in degrees" },
+    { "name": "uSphereR", "type": "float", "label": "radius", "group": "object", "min": 0.5, "max": 3.0, "step": 0.05, "def": 1.4142135623730951, "hint": "bubble radius (original was sqrt(2); the GLSL sphere stores radius^2)" },
+    { "name": "uBobAmp", "type": "float", "label": "bob", "group": "object", "min": 0.0, "max": 2.0, "step": 0.05, "def": 1.0, "hint": "vertical bob amplitude of the sphere" }
+  ],
   "source":
 `#define PI 			3.14159265359
-#define SPHERE 		vec4 (0.0, 0.0, 0.0, 2.0)
-#define FOV 		60.0
+// The original tunables are GUI uniforms (see metadata): camera FOV and the
+// sphere geometry (radius, bob). vec3 tints (FR0) stay a constant because the
+// parameter strip is scalar; defines the original left unused stay for fidelity.
 
 #define RI_AIR		1.000293
 #define RI_SPH		1.55
@@ -69,14 +83,6 @@ mat3 rotate_x (float fi) {
 		0.0, sfi, cfi);
 }
 
-mat3 rotate_y (float fi) {
-	float cfi = cos (fi);
-	float sfi = sin (fi);
-	return mat3 (
-		cfi, 0.0, sfi,
-		0.0, 1.0, 0.0,
-		-sfi, 0.0, cfi);
-}
 
 mat3 rotate_z (float fi) {
 	float cfi = cos (fi);
@@ -139,22 +145,19 @@ vec3 spherical (vec3 cart) {
 }
 
 void mainImage( out vec4 fragColor, in vec2 fragCoord ) {
-	vec2 uv = (2.0*fragCoord.xy - iResolution.xy)/min (iResolution.x, iResolution.y) * tan (radians (FOV)/2.0);
-	vec2 mo = PI * iMouse.xy / iResolution.xy;
-	
-	vec3 up = vec3 (0.0, 1.0, 0.0); 			// up 
-	vec3 fw = vec3 (0.0, 0.0, 1.0) * 			// forward
-		rotate_y (mo.x * PI); 				
+	vec2 uv = (2.0*fragCoord.xy - iResolution.xy)/min (iResolution.x, iResolution.y) * tan (radians (uFov)/2.0);
+
+	vec3 up = uCamUp;
+	vec3 fw = uCamFw;
 	vec3 lf = cross (up, fw); 					// left
-	
-	vec3 ro = -fw * 5.0; 						// ray origin
+
+	vec3 ro = uCamPos; 						// ray origin (shared orbit camera)
 	vec3 rd = normalize (uv.x * lf + uv.y * up + fw) ; 		// ray direction
 	vec3 rn = rd;
 	vec3 dr = fbm4v (uv/64.0 + sin (iTime/128.0)).xyz - 0.5;
 	//rd = normalize (rd + dr/32.0);
 	
-	vec4 sp = SPHERE + 					
-		vec4 (0.0, 1.0, 0.0, 0.0)*sin (iTime); 							
+	vec4 sp = vec4 (0.0, uBobAmp*sin (iTime), 0.0, uSphereR*uSphereR);
 	
 	float t0 = 0.0, t1 = 0.0;					// sphere intersection points
 	

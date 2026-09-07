@@ -7,7 +7,29 @@ window.SHADER_XdVSRV = {
   "scenes": ["own"],
   "group": "orig",
   "url": "https://www.shadertoy.com/view/XdVSRV",
+  "camDist": 8.5,
+  "camPitch": 0.0,
   "channels": {"0":"env_cube"},
+  "vars": [
+    { "name": "uCamPos", "type": "vec3", "feed": "camPos" },
+    { "name": "uCamRt", "type": "vec3", "feed": "camRt" },
+    { "name": "uCamUp", "type": "vec3", "feed": "camUp" },
+    { "name": "uCamFw", "type": "vec3", "feed": "camFw" }
+  ],
+  "params": [
+    { "name": "uFov", "type": "float", "label": "fov", "group": "camera", "min": 2.0, "max": 20.0, "step": 0.1, "def": 6.0, "hint": "camera focal factor of the original (bigger = more zoomed-in)" },
+    { "name": "uRadius", "type": "float", "label": "radius", "group": "bubble", "min": 0.5, "max": 3.0, "step": 0.05, "def": 1.2, "hint": "glass bubble radius" },
+    { "name": "uWall", "type": "float", "label": "wall", "group": "bubble", "min": 0.0, "max": 0.02, "step": 0.0005, "def": 0.001, "hint": "glass shell thickness (a real wall only when #define thick_bottom is on)" },
+    { "name": "uBump", "type": "float", "label": "bump", "group": "bubble", "min": 0.0, "max": 0.06, "step": 0.001, "def": 0.014, "hint": "glass bump amplitude" },
+    { "name": "uGoldRef", "type": "float", "label": "gold refl", "group": "bubble", "min": 0.0, "max": 1.0, "step": 0.01, "def": 0.99, "hint": "gold pattern reflection weight" },
+    { "name": "uIor", "type": "float", "label": "ior", "group": "material", "min": 1.0, "max": 2.0, "step": 0.01, "def": 1.47, "hint": "index of refraction of the glass" },
+    { "name": "uSpecInt", "type": "float", "label": "specular", "group": "material", "min": 0.0, "max": 2.0, "step": 0.05, "def": 0.4, "hint": "specular intensity of the glass" },
+    { "name": "uSpecShin", "type": "float", "label": "shininess", "group": "material", "min": 1.0, "max": 200.0, "step": 1.0, "def": 45.0, "hint": "specular shininess of the glass" },
+    { "name": "uAmbient", "type": "float", "label": "ambient", "group": "light", "min": 0.0, "max": 0.2, "step": 0.005, "def": 0.025, "hint": "ambient light intensity" },
+    { "name": "uBounces", "type": "int", "label": "bounces", "group": "march", "min": 1, "max": 7, "step": 1, "def": 7, "hint": "refraction/reflection bounces per ray (uniform loop bound)" },
+    { "name": "uMaxDist", "type": "float", "label": "max dist", "group": "march", "min": 10.0, "max": 100.0, "step": 1.0, "def": 40.0, "hint": "primary ray tracing distance" },
+    { "name": "uNormDelta", "type": "float", "label": "normal delta", "group": "march", "min": 0.0001, "max": 0.01, "step": 0.0001, "def": 0.001, "hint": "sampling step for the SDF normal" }
+  ],
   "source":
 `/*
 "Glass and Gold Bubble" by Emmanuel Keller aka Tambako - June 2016
@@ -25,6 +47,10 @@ Contact: tamby@tambako.ch
 #define reflections
 
 //#define antialias
+// Antialias. Compile-time on purpose: flipping it on may crash weaker
+// GPUs while compiling.
+const float aawidth = 0.8;
+const int aasamples = 2;
 
 struct Lamp
 {
@@ -59,35 +85,16 @@ struct RenderData
 
 Lamp lamps[2];
 
-// Campera options
-vec3 campos = vec3(0., -0., 10.);
-vec3 camtarget = vec3(0., 0., 0.);
-vec3 camdir = vec3(0., 0., 0.);
-float fov = 6.;
-
-// Ambient light
+// The scalar tunables of the original are GUI uniforms (see the metadata
+// above): fov, bubble radius / wall / bump / gold refl, glass material
+// (specint/specshin/ior), ambient, and the tracing options. Vector colours
+// (lamps, goldColor*, ambientColor, glassMat.col_*) stay constants because
+// the parameter strip is scalar. The antialias block stays compile-time
+// (#ifdef antialias — turning it on would need branching).
 const vec3 ambientColor = vec3(0.3);
-const float ambientint = 0.025;
-
-// Gold options
 const vec3 goldColor = vec3(1.1, 0.91, 0.52);
 const vec3 goldColor2 = vec3(1.1, 1.07, 0.88);
 const vec3 goldColor3 = vec3(1.02, 0.82, 0.55);
-const float goldRef = 0.99;
-
-// Tracing options
-const float normdelta = 0.001;
-const float maxdist = 40.;
-const int nbref = 7;
-
-// Glass perameters
-const float bubbleRadius = 1.2;
-const float bubbleThickness = 0.001;
-const float bumpFactor = 0.014;
-
-// Antialias. Change from 1 to 2 or more AT YOUR OWN RISK! It may CRASH your browser while compiling!
-const float aawidth = 0.8;
-const int aasamples = 2;
 
 TransMat glassMat;
 
@@ -100,23 +107,15 @@ void init()
                         vec3(0.01, 0.02, 0.02),
                         vec3(1.),
                         vec3(0.3, 0.5, 0.9),
-                        0.4,
-                        45.,
-                        1.47);
+                        uSpecInt,
+                        uSpecShin,
+                        uIor);
 }
 
 // Union operation from iq
 vec2 opU(vec2 d1, vec2 d2)
 {
 	return (d1.x<d2.x) ? d1 : d2;
-}
-
-vec2 rotateVec(vec2 vect, float angle)
-{
-    vec2 rv;
-    rv.x = vect.x*cos(angle) - vect.y*sin(angle);
-    rv.y = vect.x*sin(angle) + vect.y*cos(angle);
-    return rv;
 }
 
 // 1D hash function
@@ -170,15 +169,15 @@ float bubbleBump(vec3 pos)
 float map_bubble(vec3 pos)
 {
    #ifdef thick_bottom
-   float bubbleThickness2 = bubbleThickness*(1. + 500.*smoothstep(-0.25, -0.4, pos.y/bubbleRadius));
+   float bubbleThickness2 = uWall*(1. + 500.*smoothstep(-0.25, -0.4, pos.y/uRadius));
    #else
-   float bubbleThickness2 = bubbleThickness;
+   float bubbleThickness2 = uWall;
    #endif
    
-   float outside = length(pos) - bubbleRadius;
-   outside-= bumpFactor*bubbleBump(pos);
-   float inside = length(pos) - bubbleRadius + bubbleThickness2;
-   inside-= bumpFactor*bubbleBump(pos);
+   float outside = length(pos) - uRadius;
+   outside-= uBump*bubbleBump(pos);
+   float inside = length(pos) - uRadius + bubbleThickness2;
+   inside-= uBump*bubbleBump(pos);
    float df = max(outside, -inside);
    
    //df = max(df, pos.z);
@@ -280,7 +279,7 @@ vec3 lampShading(Lamp lamp, vec3 norm, vec3 pos, vec3 ocol, int objnr, int lampn
     float specint = glassMat.specint;
     float specshin = glassMat.specshin;  
     //if (dot(norm, lamp.position - pos) > 0.0)
-        col+= lamp.color*lamp.intensity*specint*pow(max(0.0, dot(reflect(pl, norm), normalize(pos - campos))), specshin);
+        col+= lamp.color*lamp.intensity*specint*pow(max(0.0, dot(reflect(pl, norm), normalize(pos - uCamPos))), specshin);
     #endif
     
     // Softshadow
@@ -301,38 +300,6 @@ vec3 lampsShading(vec3 norm, vec3 pos, vec3 ocol, int objnr)
     return col;
 }
 
-// From https://www.shadertoy.com/view/lsSXzD, modified
-vec3 GetCameraRayDir(vec2 vWindow, vec3 vCameraDir, float fov)
-{
-	vec3 vForward = normalize(vCameraDir);
-	vec3 vRight = normalize(cross(vec3(0.0, 1.0, 0.0), vForward));
-	vec3 vUp = normalize(cross(vForward, vRight));
-    
-	vec3 vDir = normalize(vWindow.x * vRight + vWindow.y * vUp + vForward * fov);
-
-	return vDir;
-}
-
-// Sets the position of the camera with the mouse and calculates its direction
-const float axm = 4.;
-const float aym = 1.5;
-void setCamera()
-{
-   vec2 iMouse2;
-   if (iMouse.x==0. && iMouse.y==0.)
-      iMouse2 = vec2(0.5, 0.5);
-   else
-      iMouse2 = iMouse.xy/iResolution.xy;
-    
-   campos = vec3(8.5, 0., 0.);
-   campos.xy = rotateVec(campos.xy, -iMouse2.y*aym + aym*0.5);
-   campos.yz = rotateVec(campos.yz, -iMouse2.y*aym + aym*0.5);
-   campos.xz = rotateVec(campos.xz, -iMouse2.x*axm);
-
-   camtarget = vec3(0.);
-   camdir = camtarget - campos;   
-}
-
 // Tracing and rendering a ray
 RenderData trace0(vec3 tpos, vec3 ray, float maxdist, bool inside)
 {
@@ -345,11 +312,11 @@ RenderData trace0(vec3 tpos, vec3 ray, float maxdist, bool inside)
     
     if (tx<maxdist*0.95)
     {
-        norm = getNormal(pos, normdelta, inside);
+        norm = getNormal(pos, uNormDelta, inside);
         col = getColor(norm, pos, objnr, ray);
       
         // Shading
-        col = ambientColor*ambientint + lampsShading(norm, pos, col, objnr);
+        col = ambientColor*uAmbient + lampsShading(norm, pos, col, objnr);
     }
     else
     {
@@ -367,12 +334,15 @@ vec3 getGlassAbsColor(float dist, vec3 color)
 // Main render function with reflections and refractions
 vec4 render(vec2 fragCoord)
 {   
-   	vec2 uv = fragCoord.xy / iResolution.xy; 
+   	vec2 uv = fragCoord.xy / iResolution.xy;
    	uv = uv*2.0 - 1.0;
    	uv.x*= iResolution.x / iResolution.y;
 
-   	vec3 ray = GetCameraRayDir(uv, camdir, fov);
-   	RenderData traceinf = trace0(campos, ray, maxdist, false);
+   	// shared orbit camera (js/camera.js): basis + per-shader focal factor
+   	vec3 vRight = normalize(cross(uCamUp, uCamFw));
+   	vec3 vUp = normalize(cross(uCamFw, vRight));
+   	vec3 ray = normalize(uv.x * vRight + uv.y * vUp + uCamFw * uFov);
+   	RenderData traceinf = trace0(uCamPos, ray, uMaxDist, false);
    	vec3 col = traceinf.col;
    	bool inside = false;
    	float cior = glassMat.ior;
@@ -381,7 +351,7 @@ vec4 render(vec2 fragCoord)
 
     glassf = vec3(1.);
 
-    for (int i=0; i<nbref; i++)
+    for (int i=0; i<uBounces; i++)
     {
         if (traceinf.objnr==BUBBLE_OBJ)
         {	 
@@ -390,7 +360,7 @@ vec4 render(vec2 fragCoord)
             refray = reflect(ray, traceinf.norm);
             float rf = fresnel(ray, traceinf.norm, glassMat.ior); 
             vec3 colGl = mix(col, sky_color(refray), rf*glassf);
-            vec3 colGo = mix(col, getGoldColor(traceinf.pos)*sky_color(refray), goldRef);
+            vec3 colGo = mix(col, getGoldColor(traceinf.pos)*sky_color(refray), uGoldRef);
           
             if (!inside)
             {
@@ -431,7 +401,6 @@ vec4 render(vec2 fragCoord)
 void mainImage(out vec4 fragColor, in vec2 fragCoord)
 {   
     init();
-    setCamera();
     
     // Antialiasing.
     #ifdef antialias

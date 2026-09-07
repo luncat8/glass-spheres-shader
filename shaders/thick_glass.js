@@ -15,17 +15,28 @@ window.SHADER_thick_glass = {
   "title": "glass bubbles with visible wall thickness (4 spheres)",
   "scenes": ["own"],
   "group": "own",
+  "camDist": 5.0,
+  "camPitch": 0.0,
   "channels": {"0":"env_cube","1":"env_cube","2":"noise","3":"noise"},
+  "vars": [
+    { "name": "uCamPos", "type": "vec3", "feed": "camPos" },
+    { "name": "uCamRt", "type": "vec3", "feed": "camRt" },
+    { "name": "uCamUp", "type": "vec3", "feed": "camUp" },
+    { "name": "uCamFw", "type": "vec3", "feed": "camFw" }
+  ],
+  "params": [
+    { "name": "uFov", "type": "float", "label": "fov", "group": "camera", "min": 30, "max": 110, "step": 0.5, "def": 60.0, "hint": "vertical field of view in degrees" },
+    { "name": "uIor", "type": "float", "label": "ior", "group": "glass", "min": 1.0, "max": 2.0, "step": 0.01, "def": 1.55, "hint": "index of refraction of the glass (original RI_SPH)" }
+  ],
   "source":
 `#define PI 3.14159265359
-#define FOV 60.0
 
+// FOV and the glass IOR are GUI uniforms (see metadata). FR0 (vec3 fresnel
+// weights) stays a constant because the parameter strip is scalar.
 #define RI_AIR 1.000293
-#define RI_SPH 1.55
-#define ETA (RI_AIR / RI_SPH)
+#define ETA (RI_AIR / uIor)
 
 #define FR0 vec3 (0.0, 1.0, 0.7)
-#define NB 4
 
 const vec3 ABSORB0 = vec3 (0.35, 0.20, 0.10);
 const vec3 ABSORB1 = vec3 (0.10, 0.30, 0.45);
@@ -115,15 +126,13 @@ vec3 shade_bubble (vec3 ro, vec3 rd, vec3 front_n, vec3 back_n,
 }
 
 void mainImage (out vec4 fragColor, in vec2 fragCoord) {
-	vec2 uv = (2.0*fragCoord.xy - iResolution.xy) / min (iResolution.x, iResolution.y) * tan (radians (FOV)/2.0);
-	vec2 mo = PI * iMouse.xy / iResolution.xy;
+	vec2 uv = (2.0*fragCoord.xy - iResolution.xy) / min (iResolution.x, iResolution.y) * tan (radians (uFov)/2.0);
 
-	vec3 up = vec3 (0.0, 1.0, 0.0);
-	float ang = mo.x * PI;
-	vec3 fw = vec3 (sin (ang), 0.0, cos (ang));
+	vec3 up = uCamUp;
+	vec3 fw = uCamFw;
 	vec3 lf = cross (up, fw);
 
-	vec3 ro = -fw * 5.0;
+	vec3 ro = uCamPos; // shared orbit camera
 	vec3 rd = normalize (uv.x * lf + uv.y * up + fw);
 
 	// 4 bubble centers (xyz) and radii (w)

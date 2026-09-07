@@ -7,7 +7,7 @@ const shaders = loadShaders();
 const analytic = shaders.find(s => s.id === 'analytic_layers');
 
 test('diagnostics use the exact production assembler for every supported variant', () => {
-	assert.equal(shaders.length, 11);
+	assert.equal(shaders.length, 12);
 	for (const meta of shaders) {
 		const names = [...meta.params || [], ...meta.arrays || [], ...meta.vars || []].map(p => p.name);
 		assert.equal(new Set(names).size, names.length, meta.id + ': duplicate uniforms');

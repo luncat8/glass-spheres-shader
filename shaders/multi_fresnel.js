@@ -6,14 +6,24 @@ window.SHADER_multi_fresnel = {
   "title": "multi-bubble refractive spheres with fbm fresnel",
   "scenes": ["own"],
   "group": "own",
+  "camDist": 5.0,
+  "camPitch": 0.0,
   "channels": {"0":"env_cube","1":"env_cube","2":"noise","3":"noise"},
+  "vars": [
+    { "name": "uCamPos", "type": "vec3", "feed": "camPos" },
+    { "name": "uCamRt", "type": "vec3", "feed": "camRt" },
+    { "name": "uCamUp", "type": "vec3", "feed": "camUp" },
+    { "name": "uCamFw", "type": "vec3", "feed": "camFw" }
+  ],
+  "params": [
+    { "name": "uFov", "type": "float", "label": "fov", "group": "camera", "min": 30, "max": 110, "step": 0.5, "def": 60.0, "hint": "vertical field of view in degrees" },
+    { "name": "uCount", "type": "int", "label": "spheres", "group": "objects", "min": 1, "max": 4, "step": 1, "def": 4, "hint": "how many of the 4 animated spheres are traced" }
+  ],
   "source":
 `#define PI 3.14159265359
-#define FOV 60.0
-#define RI_AIR 1.000293
-#define RI_SPH 1.55
+// FOV and the sphere count are GUI uniforms (see metadata above). FR0 (vec3
+// fresnel weights) stays a constant because the parameter strip is scalar.
 #define FR0 vec3 (0.0, 1.0, 0.7)
-#define NB 4
 float noise (vec2 co) {
 	return length (texture (iChannel2, co));
 }
@@ -41,7 +51,7 @@ void nearest_hits (vec3 ro, vec3 rd, vec4 s0, vec4 s1, vec4 s2, vec4 s3,
 	bestFront = 1e9;
 	bestBack = -1.0;
 	fi = -1; bi = -1;
-	for (int i = 0; i < NB; i++) {
+	for (int i = 0; i < uCount; i++) {
 		vec4 sp = (i == 0) ? s0 : (i == 1) ? s1 : (i == 2) ? s2 : s3;
 		vec3 oc = ro - sp.xyz;
 		float A = dot (rd, rd);
@@ -68,13 +78,11 @@ float fresnel_step (vec3 I, vec3 N, vec3 f) {
 	return clamp (f.x + f.y * pow (1.0 + dot (I, N), f.z), 0.0, 1.0);
 }
 void mainImage (out vec4 fragColor, in vec2 fragCoord) {
-	vec2 uv = (2.0*fragCoord.xy - iResolution.xy) / min (iResolution.x, iResolution.y) * tan (radians (FOV)/2.0);
-	vec2 mo = PI * iMouse.xy / iResolution.xy;
-	vec3 up = vec3 (0.0, 1.0, 0.0);
-	float ang = mo.x * PI;
-	vec3 fw = vec3 (sin (ang), 0.0, cos (ang));
+	vec2 uv = (2.0*fragCoord.xy - iResolution.xy) / min (iResolution.x, iResolution.y) * tan (radians (uFov)/2.0);
+	vec3 up = uCamUp;
+	vec3 fw = uCamFw;
 	vec3 lf = cross (up, fw);
-	vec3 ro = -fw * 5.0;
+	vec3 ro = uCamPos; // shared orbit camera
 	vec3 rd = normalize (uv.x * lf + uv.y * up + fw);
 	vec4 c0, c1, c2, c3;
 	c0 = vec4 ( 0.0 + sin (iTime*0.7),  1.0*sin (iTime),            0.0, 2.0);

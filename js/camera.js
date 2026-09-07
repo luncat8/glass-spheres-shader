@@ -7,10 +7,11 @@
 // (camPos / camRt / camUp / camFw / camSel / camSelRot); shaders declare
 // matching `vars` in their metadata.
 //
-// Only shaders that declare `uCamPos` in `vars` consume that basis, and only
-// they are orbited, zoomed, picked and auto-spun (see sharedCam()). Shaders
-// that drive their own GLSL camera from iMouse — the Shadertoy ports and the
-// own-scene variants — just get their iMouse forwarded and are left alone.
+// Every shader that renders a 3D world declares `uCamPos` in `vars` and gets
+// the full shared camera (orbit, zoom, pinch, pick, auto-spin). Shaders that
+// declare `camDist`/`camPitch` in their metadata (the ports and own-scene
+// variants) are framed at their original viewing distance when first picked.
+// Only shaders with no camera at all (the 2D cellular one) keep the button off.
 //
 // Drag is viewport-relative and follows the cursor ("grab the scene"): both
 // axes are normalised by min(clientWidth, clientHeight), so the same physical
@@ -59,12 +60,11 @@
 	let pinchDist = 0;
 	let dragDist = 0, dragging = false;
 
-	// The orbit camera only drives shaders that consume its feeds, and those
+	// The orbit camera drives every shader that consumes its feeds, and those
 	// declare `uCamPos` in `vars` — the same contract the runner uses to upload
-	// the basis, so it cannot drift from what the GLSL actually reads. Legacy
-	// Shadertoy ports and own-scene shaders orbit inside GLSL from `iMouse`, so
-	// for them this module is an input forwarder: no orbit, no zoom, no pick,
-	// no auto-spin. Memoised on the meta identity (pointer compare per event).
+	// the basis, so it cannot drift from what the GLSL actually reads. Shaders
+	// with no camera basis (the 2D cellular one) get no orbit, no zoom, no pick
+	// and no auto-spin. Memoised on the meta identity (pointer compare per event).
 	let sharedMeta, sharedFlag = false;
 
 	function declaresCamPos(meta) {
@@ -314,8 +314,9 @@
 		}
 	}
 
-	// the legacy GLSL cameras (XdXXzB, thick_glass, ...) orbit from iMouse, so
-	// this stays unconditional and keeps working on touch
+	// the legacy GLSL iMouse cameras are gone; every 3D shader orbits through
+	// this module. iMouse still gets forwarded for Shadertoy-compatible
+	// uniforms (llsSDf does not use it, but the runner's contract keeps it).
 	function forwardIMouse(e) {
 		if (!runner || !runner.mouse || !canvas) return;
 		const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -384,9 +385,21 @@
 		canvas.addEventListener('wheel', onWheel, { passive: false });
 	}
 
-	// called by ui on shader select: keep yaw/pitch/distance, drop selection
-	function attach() {
+	// called by ui on shader select: drop the selection. Shaders that declare
+	// their own home framing (camDist — the ports / own-scene variants, whose
+	// original cameras stood at a fixed distance from the subject) get framed
+	// like a scene pick, but only when entering the shader, not when it is
+	// already on screen (the user may have moved the view).
+	let lastFramed = null;
+	function attach(meta) {
 		clearSel();
+		if (!meta || !(meta.camDist > 0) || meta === lastFramed) return;
+		lastFramed = meta;
+		Cam.dist = clamp(meta.camDist, MIN_DIST, MAX_DIST);
+		if (typeof meta.camPitch === 'number') {
+			Cam.pitch = clamp(meta.camPitch, -PITCH_MAX, PITCH_MAX);
+			Cam.autoPitch = Cam.pitch;
+		}
 	}
 
 	// called by ui on scene select: each shared scene presents itself from its

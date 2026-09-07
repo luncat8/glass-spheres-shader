@@ -236,16 +236,30 @@
 
 	// parameter strip generated from the current shader's `params` metadata.
 	// Sliders write straight into param.value; options params (p.options) render
-	// as a <select>. runner.js uploads the values per frame.
+	// as a <select>. runner.js uploads the values per frame. Consecutive params
+	// sharing a `group` name are wrapped into one labelled segment, so shaders
+	// with many exposed settings stay readable (groups follow param order).
 	function buildParams(meta) {
 		paramsHost.textContent = '';
 		const ps = (meta && meta.params) || [];
 		let shown = 0;
+		let groupEl = null, groupName = undefined;
 		for (let i = 0; i < ps.length; i++) {
 			const p = ps[i];
 			if (p.value === undefined) p.value = p.def;
 			if (!paramVisible(p)) continue;
 			shown++;
+			if (!groupEl || p.group !== groupName) {
+				groupName = p.group || '';
+				groupEl = document.createElement('div');
+				groupEl.className = 'param-group';
+				if (groupName) {
+					const cap = document.createElement('b');
+					cap.textContent = groupName;
+					groupEl.appendChild(cap);
+				}
+				paramsHost.appendChild(groupEl);
+			}
 			const wrap = document.createElement('label');
 			wrap.className = 'param';
 			wrap.title = p.hint || p.name;
@@ -262,7 +276,7 @@
 				}
 				sel.addEventListener('change', () => { p.value = parseFloat(sel.value); });
 				wrap.appendChild(name); wrap.appendChild(sel);
-				paramsHost.appendChild(wrap);
+				groupEl.appendChild(wrap);
 				continue;
 			}
 			const slider = document.createElement('input');
@@ -276,7 +290,7 @@
 				read.textContent = fmt(p.value, p.step);
 			});
 			wrap.appendChild(name); wrap.appendChild(slider); wrap.appendChild(read);
-			paramsHost.appendChild(wrap);
+			groupEl.appendChild(wrap);
 		}
 		paramsHost.style.display = 'flex';
 		if (shown) return;

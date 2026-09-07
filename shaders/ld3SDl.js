@@ -18,10 +18,33 @@ window.SHADER_ld3SDl = {
   "scenes": ["own"],
   "group": "orig",
   "url": "https://www.shadertoy.com/view/ld3SDl",
+  "camDist": 6.5,
+  "camPitch": 0.0,
   "channels": {"0":"env_cube","1":"thickness","2":"noise","3":"noise"},
+  "vars": [
+    { "name": "uCamPos", "type": "vec3", "feed": "camPos" },
+    { "name": "uCamRt", "type": "vec3", "feed": "camRt" },
+    { "name": "uCamUp", "type": "vec3", "feed": "camUp" },
+    { "name": "uCamFw", "type": "vec3", "feed": "camFw" }
+  ],
   "params": [
-    { "name": "uIterations", "type": "int", "def": 20, "hidden": true, "hint": "raymarch step budget (uniform loop bound, keeps the driver from unrolling)" },
-    { "name": "uAASamples", "type": "int", "def": 1, "hidden": true, "hint": "anti-alias sample count (uniform loop bound, keeps the driver from unrolling)" }
+    { "name": "uFov", "type": "float", "label": "fov", "group": "camera", "min": 30, "max": 110, "step": 0.5, "def": 67.38013505195957, "hint": "vertical field of view in degrees (default = the original's 1.5 lens length)" },
+    { "name": "uIterations", "type": "int", "label": "steps", "group": "march", "min": 1, "max": 64, "step": 1, "def": 20, "hint": "raymarch step budget (uniform loop bound, keeps the driver from unrolling)" },
+    { "name": "uAASamples", "type": "int", "label": "aa", "group": "march", "min": 1, "max": 8, "step": 1, "def": 1, "hint": "anti-alias samples around each pixel (uniform loop bound, keeps the driver from unrolling)" },
+    { "name": "uEps", "type": "float", "label": "eps", "group": "march", "min": 0.001, "max": 0.05, "step": 0.001, "def": 0.01, "hint": "raymarch intersection precision, also the SDF-normal delta" },
+    { "name": "uBound", "type": "float", "label": "bound", "group": "march", "min": 2.0, "max": 12.0, "step": 0.5, "def": 6.0, "hint": "cube bounds check around the origin" },
+    { "name": "uDistScale", "type": "float", "label": "dist scale", "group": "march", "min": 0.3, "max": 1.5, "step": 0.05, "def": 0.9, "hint": "fraction of the SDF step taken per iteration (conservative under-step)" },
+    { "name": "uDispersion", "type": "float", "label": "dispersion", "group": "optics", "min": 0.0, "max": 0.3, "step": 0.005, "def": 0.05, "hint": "chromatic dispersion amount" },
+    { "name": "uIor", "type": "float", "label": "ior", "group": "optics", "min": 1.0, "max": 2.0, "step": 0.01, "def": 1.0, "hint": "base index of refraction, as a ratio" },
+    { "name": "uThickScale", "type": "float", "label": "film scale", "group": "optics", "min": 0.0, "max": 200.0, "step": 1.0, "def": 32.0, "hint": "film thickness scaling factor" },
+    { "name": "uThickCube", "type": "float", "label": "film cube scale", "group": "optics", "min": 0.0, "max": 1.0, "step": 0.005, "def": 0.1, "hint": "film thickness cubemap scaling factor" },
+    { "name": "uReflScale", "type": "float", "label": "reflectance", "group": "optics", "min": 0.0, "max": 8.0, "step": 0.1, "def": 3.0, "hint": "reflectance scaling factor" },
+    { "name": "uReflGamma", "type": "float", "label": "refl gamma", "group": "optics", "min": 0.0, "max": 6.0, "step": 0.1, "def": 2.0, "hint": "reflectance gamma scaling factor" },
+    { "name": "uFresnel", "type": "float", "label": "fresnel", "group": "optics", "min": 0.0, "max": 1.0, "step": 0.01, "def": 0.7, "hint": "fresnel weight for reflectance" },
+    { "name": "uContrast", "type": "float", "label": "contrast", "group": "grade", "min": 0.5, "max": 40.0, "step": 0.5, "def": 8.0, "hint": "sigmoid contrast enhancement" },
+    { "name": "uGammaCurve", "type": "float", "label": "curve", "group": "grade", "min": 5.0, "max": 400.0, "step": 5.0, "def": 50.0, "hint": "filmic gamma curve constant" },
+    { "name": "uGammaScale", "type": "float", "label": "gamma", "group": "grade", "min": 0.5, "max": 10.0, "step": 0.1, "def": 4.5, "hint": "filmic gamma scale" },
+    { "name": "uGreenWeight", "type": "float", "label": "green weight", "group": "grade", "min": 0.5, "max": 8.0, "step": 0.1, "def": 2.8, "hint": "green weight when resampling the 6 wavelengths down to RGB" }
   ],
   "source":
 `/*
@@ -37,22 +60,13 @@ window.SHADER_ld3SDl = {
 */
 
 
-#define INTERSECTION_PRECISION 0.01  // raymarcher intersection precision
-#define ITERATIONS 20				 // compile-time cap for the uniform uIterations bound
-#define BOUND 6.0					 // cube bounds check
-#define DIST_SCALE 0.9   			 // scaling factor for raymarching position update
-
-#define DISPERSION 0.05				 // dispersion amount
-#define IOR 1.0     				 // base IOR value specified as a ratio
-#define THICKNESS_SCALE 32.0		 // film thickness scaling factor
-#define THICKNESS_CUBEMAP_SCALE 0.1  // film thickness cubemap scaling factor
-#define REFLECTANCE_SCALE 3.0        // reflectance scaling factor
-#define REFLECTANCE_GAMMA_SCALE 2.0  // reflectance gamma scaling factor
-#define FRESNEL_RATIO 0.7			 // fresnel weight for reflectance
-#define SIGMOID_CONTRAST 8.0         // contrast enhancement
-
+// The original tunables (#defines) are uniforms driven by the GUI — the
+// metadata above lists every one. Only the structurally fixed ones stay as
+// constants: TWO_PI, WAVELENGTHS (array size) and ITERATIONS (compile-time
+// cap for the uniform loop bound).
+#define ITERATIONS 64
 #define TWO_PI 6.28318530718
-#define WAVELENGTHS 6				 // number of wavelengths, not a free parameter
+#define WAVELENGTHS 6
 
 vec3 fancyCube( sampler2D sam, in vec3 d, in float s, in float b )
 {
@@ -100,32 +114,27 @@ vec3 fresnel( vec3 rd, vec3 norm, vec3 n2 ) {
 }
 
 vec3 calcNormal( in vec3 pos ) {
-    const float eps = INTERSECTION_PRECISION;
-
     const vec3 v1 = vec3( 1.0,-1.0,-1.0);
     const vec3 v2 = vec3(-1.0,-1.0, 1.0);
     const vec3 v3 = vec3(-1.0, 1.0,-1.0);
     const vec3 v4 = vec3( 1.0, 1.0, 1.0);
 
-	return normalize( v1*sdf( pos + v1*eps ) + 
-					  v2*sdf( pos + v2*eps ) + 
-					  v3*sdf( pos + v3*eps ) + 
-					  v4*sdf( pos + v4*eps ) );
+	return normalize( v1*sdf( pos + v1*uEps ) + 
+					  v2*sdf( pos + v2*uEps ) + 
+					  v3*sdf( pos + v3*uEps ) + 
+					  v4*sdf( pos + v4*uEps ) );
 }
 
-#define GAMMA_CURVE 50.0
-#define GAMMA_SCALE 4.5
 vec3 filmic_gamma(vec3 x) {
-	return log(GAMMA_CURVE * x + 1.0) / GAMMA_SCALE;    
+	return log(uGammaCurve * x + 1.0) / uGammaScale;    
 }
 
 vec3 filmic_gamma_inverse(vec3 y) {
-	return (1.0 / GAMMA_CURVE) * (exp(GAMMA_SCALE * y) - 1.0); 
+	return (1.0 / uGammaCurve) * (exp(uGammaScale * y) - 1.0); 
 }
 
-#define GREEN_WEIGHT 2.8
 vec3 texCubeSampleWeights(float i) {
-	vec3 w = vec3((1.0 - i) * (1.0 - i), GREEN_WEIGHT * i * (1.0 - i), i * i);
+	vec3 w = vec3((1.0 - i) * (1.0 - i), uGreenWeight * i * (1.0 - i), i * i);
     return w / dot(w, vec3(1.0));
 }
 
@@ -152,7 +161,7 @@ vec3 sampleCubeMap(vec3 i, vec3 rd0, vec3 rd1, vec3 rd2) {
 
 
 vec3 sampleWeights(float i) {
-	return vec3((1.0 - i) * (1.0 - i), GREEN_WEIGHT * i * (1.0 - i), i * i);
+	return vec3((1.0 - i) * (1.0 - i), uGreenWeight * i * (1.0 - i), i * i);
 }
 
 vec3 resample(vec3 wl0, vec3 wl1, vec3 i0, vec3 i1) {
@@ -201,24 +210,16 @@ vec3 iorCurve(vec3 x) {
 }
 
 vec3 attenuation(float filmThickness, vec3 wavelengths, vec3 normal, vec3 rd) {
-	return 0.5 + 0.5 * cos(((THICKNESS_SCALE * filmThickness)/(wavelengths + 1.0)) * dot(normal, rd));    
+	return 0.5 + 0.5 * cos(((uThickScale * filmThickness)/(wavelengths + 1.0)) * dot(normal, rd));    
 }
 
 vec3 contrast(vec3 x) {
-	return 1.0 / (1.0 + exp(-SIGMOID_CONTRAST * (x - 0.5)));    
+	return 1.0 / (1.0 + exp(-uContrast * (x - 0.5)));    
 }
 
-void doCamera( out vec3 camPos, out vec3 camTar, in float time, in vec4 m ) {
-    camTar = vec3(0.0,0.0,0.0); 
-    if (max(m.z, m.w) <= 0.0) {
-    	float an = 1.5 + sin(time * 0.05) * 4.0;
-		camPos = vec3(6.5*sin(an), 0.0 ,6.5*cos(an));   
-    } else {
-    	float an = 10.0 * m.x - 5.0;
-		camPos = vec3(6.5*sin(an),10.0 * m.y - 5.0,6.5*cos(an)); 
-    }
-}
-
+// Camera comes from the shared orbit rig (js/camera.js): uCamPos + basis.
+// The projection keeps the original's look-at matrix; the "lens length" 1.5
+// is the cotangent of half the FOV, so uFov maps onto it (default 67.38°).
 mat3 calcLookAtMatrix( in vec3 ro, in vec3 ta, in float roll )
 {
     vec3 ww = normalize( ta - ro );
@@ -230,62 +231,59 @@ mat3 calcLookAtMatrix( in vec3 ro, in vec3 ta, in float roll )
 void mainImage( out vec4 fragColor, in vec2 fragCoord )
 {
     vec2 p = (-iResolution.xy + 2.0*fragCoord.xy)/iResolution.y;
-    vec4 m = vec4(iMouse.xy/iResolution.xy, iMouse.zw);
 
-    // camera movement
-    vec3 ro, ta;
-    doCamera( ro, ta, iTime, m );
-    mat3 camMat = calcLookAtMatrix( ro, ta, 0.0 );
-    
+    vec3 ro = uCamPos;
+    mat3 camMat = calcLookAtMatrix( ro, ro + uCamFw, 0.0 );
+    float lens = 1.0 / tan (radians (uFov) * 0.5);
+
     float dh = (0.666 / iResolution.y);
-    
+
     vec3 col = vec3(0.0);
-    
+
     vec3 wavelengths0 = vec3(1.0, 0.8, 0.6);
     vec3 wavelengths1 = vec3(0.4, 0.2, 0.0);
-    vec3 iors0 = IOR + iorCurve(wavelengths0) * DISPERSION;
-    vec3 iors1 = IOR + iorCurve(wavelengths1) * DISPERSION;
-    
+    vec3 iors0 = uIor + iorCurve(wavelengths0) * uDispersion;
+    vec3 iors1 = uIor + iorCurve(wavelengths1) * uDispersion;
+
     vec3 rds[WAVELENGTHS];
-    
-    // uIterations/uAASamples are uniforms: ANGLE's HLSL translator unrolls
-    // constant-bound loops, and a 20-step unroll of the warped sphere SDF
-    // would be a multi-second link; uniform-driven bounds keep them real loops.
-    int maxIter = min(uIterations, ITERATIONS);
+
+    // uniform-driven bounds keep the loops real (ANGLE's HLSL translator
+    // would unroll constant-bound loops into a multi-second link)
+    int maxIter = min(max(uIterations, 1), ITERATIONS);
     int aa = max(uAASamples, 1);
     float rads = TWO_PI / float(aa);
     for (int samp = 0; samp < aa; samp++) {
         vec2 dxy = dh * vec2(cos(float(samp) * rads), sin(float(samp) * rads));
-        vec3 rd = normalize(camMat * vec3(p.xy + dxy, 1.5)); // 1.5 is the lens length
+        vec3 rd = normalize(camMat * vec3(p.xy + dxy, lens));
 		vec3 pos = ro;
         bool hit = false;
         for (int j = 0; j < maxIter; j++) {
-            float t = DIST_SCALE * sdf(pos);
+            float t = uDistScale * sdf(pos);
             pos += t * rd;
-            hit = t < INTERSECTION_PRECISION;
-            if ( clamp(pos, -BOUND, BOUND) != pos || hit ) {
-                break;    
+            hit = t < uEps;
+            if ( clamp(pos, -uBound, uBound) != pos || hit ) {
+                break;
             }
         }
-        
+
         if (hit) {
             vec3 normal = calcNormal(pos);
 
-            float filmThickness = fancyCube( iChannel1, normal, THICKNESS_CUBEMAP_SCALE, 0.0 ).x + 0.1;
+            float filmThickness = fancyCube( iChannel1, normal, uThickCube, 0.0 ).x + 0.1;
 
             vec3 att0 = attenuation(filmThickness, wavelengths0, normal, rd);
             vec3 att1 = attenuation(filmThickness, wavelengths1, normal, rd);
 
-            vec3 f0 = (1.0 - FRESNEL_RATIO) + FRESNEL_RATIO * fresnel(rd, normal, 1.0 / iors0);
-            vec3 f1 = (1.0 - FRESNEL_RATIO) + FRESNEL_RATIO * fresnel(rd, normal, 1.0 / iors1);
+            vec3 f0 = (1.0 - uFresnel) + uFresnel * fresnel(rd, normal, 1.0 / iors0);
+            vec3 f1 = (1.0 - uFresnel) + uFresnel * fresnel(rd, normal, 1.0 / iors1);
 
             vec3 rrd = reflect(rd, normal);
 
-            vec3 cube0 = REFLECTANCE_GAMMA_SCALE * att0 * sampleCubeMap(wavelengths0, rrd);
-            vec3 cube1 = REFLECTANCE_GAMMA_SCALE * att1 * sampleCubeMap(wavelengths1, rrd);
+            vec3 cube0 = uReflGamma * att0 * sampleCubeMap(wavelengths0, rrd);
+            vec3 cube1 = uReflGamma * att1 * sampleCubeMap(wavelengths1, rrd);
 
-            vec3 refl0 = REFLECTANCE_SCALE * filmic_gamma_inverse(mix(vec3(0), cube0, f0));
-            vec3 refl1 = REFLECTANCE_SCALE * filmic_gamma_inverse(mix(vec3(0), cube1, f1));
+            vec3 refl0 = uReflScale * filmic_gamma_inverse(mix(vec3(0), cube0, f0));
+            vec3 refl1 = uReflScale * filmic_gamma_inverse(mix(vec3(0), cube1, f1));
 
             rds[0] = refract(rd, normal, iors0.x);
             rds[1] = refract(rd, normal, iors0.y);
