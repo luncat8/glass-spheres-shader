@@ -30,8 +30,8 @@ float sminK (float a, float b, float k, out float m) {
 vec2 map (vec3 p) {
 	float d = BIG;
 	float m = 0.0;
-	for (int i = 0; i < MAXB; i++) {
-		if (i >= uCount) break;
+	int nB = min (uCount, MAXB);
+	for (int i = 0; i < nB; i++) {
 		vec4 sp = uBubbles[i];
 		float h;
 		d = sminK (d, length (p - sp.xyz) - sp.w, SMOOTH_K, h);
@@ -53,7 +53,8 @@ vec3 mapNormal (vec3 p) {
 vec2 march (vec3 ro, vec3 rd, float side) {
 	float t = 0.02;
 	float m = 0.0;
-	for (int i = 0; i < MAXSTEPS; i++) {
+	// uniform bound: keeps the ANGLE/HLSL translation from unrolling the loop
+	for (int i = 0; i < uSteps; i++) {
 		vec2 h = map (ro + rd * t);
 		m = h.y;
 		float d = side * h.x;
@@ -120,7 +121,8 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 		],
 		"params": [
 			{ "name": "uCount", "type": "int", "def": 64 },
-			{ "name": "uScene", "type": "int", "def": 0 }
+			{ "name": "uScene", "type": "int", "def": 0 },
+			{ "name": "uSteps", "type": "int", "def": 48, "hidden": true }
 		]
 	}
 };

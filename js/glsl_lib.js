@@ -434,8 +434,10 @@ vec3 cageOverlay (vec3 behind, vec3 ro, vec3 rd) {
 	float topT = BIG;
 	vec4 topSphere = vec4 (0.0);
 	float topId = -1.0;
-	for (int i = 0; i < CAGE_TOP_MAX; i++) {
-		if (i >= uTopCount) break;
+	// bound from the uTopCount uniform: a constant bound + internal break
+	// makes ANGLE/HLSL try to unroll the loop at compile time
+	int topN = min (uTopCount, CAGE_TOP_MAX);
+	for (int i = 0; i < topN; i++) {
 		vec2 h = ray_sphere (ro, rd, uTop[i].xyz, uTop[i].w);
 		float t = h.x > 0.002 ? h.x : h.y;
 		if (h.y <= 0.002 || h.y < h.x || t >= topT) continue;
@@ -557,11 +559,14 @@ vec3 landNormal (vec2 xz) {
 // steps, then four bisections. -1.0 when the ray stays above the terrain.
 // (was 5 bisections + 96 max steps — reduced after slow-compile reports)
 float landMarch (vec3 ro, vec3 rd, float t0, float t1, int steps) {
-	float dt = (t1 - t0) / float (steps);
+	// n is derived from the uLandSteps uniform: the dynamic bound keeps the
+	// driver from unrolling the 64-step loop during compilation (ANGLE/FXC,
+	// see COMPILE_DEBUG.md) without changing the runtime budget.
+	int n = min (steps, LAND_MAX_STEPS);
+	float dt = (t1 - t0) / float (n);
 	if (dt <= 0.0) return -1.0;
 	float a = t0;
-	for (int i = 1; i <= LAND_MAX_STEPS; i++) {
-		if (i > steps) break;
+	for (int i = 1; i <= n; i++) {
 		float b = t0 + dt * float (i);
 		vec3 p = ro + rd * b;
 		if (p.y > landHeight (p.xz)) { a = b; continue; }

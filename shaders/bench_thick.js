@@ -58,8 +58,8 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 	float bestT = BIG;
 	int bi = -1;
 	vec2 bestH = vec2 (1.0, -1.0);
-	for (int i = 0; i < MAXB; i++) {
-		if (i >= uCount) break;
+	int nB = min (uCount, MAXB);
+	for (int i = 0; i < nB; i++) {
 		vec4 sp = uBubbles[i];
 		vec2 h = ray_sphere (ro, rd, sp.xyz, sp.w);
 		if (h.y <= 0.0) continue;

@@ -15,6 +15,7 @@ button:hover{background:#3a3a3a}
 <div style="padding:8px;display:flex;gap:8px;flex-wrap:wrap">
 <button id="runAll">compile all shaders (timed)</button>
 <button id="runSeq">compile first 5 in sequence (simulates startup)</button>
+<button id="runVariants">compile every scene/shape variant of the first shader</button>
 <button id="clear">clear</button>
 <span id="status">idle</span>
 </div>
@@ -45,132 +46,215 @@ const statusEl = document.getElementById('status');
 function log(s){ logEl.textContent += s + '\n'; console.log(s); }
 function clearLog(){ logEl.textContent=''; }
 
-function compileOne(gl, meta, terrain, shape){
+const SHAPE = { sphere:0, cube:1, tetra:2, knot:3 };
+
+// Build the exact source the runner sends to the driver for one variant.
+function buildSource(meta, terrain, shape){
   const helpers = window.Runner.helpers;
   const flags = helpers.resolveChannelKinds(meta.source, meta.channels);
   const header = helpers.buildFSHeader(meta.source, flags) + helpers.buildUniformDecls(meta);
-  const useTerrain = terrain ? 1 : 0;
-  const shapeMode = shape === undefined ? 0 : shape;
-  const src = header + '#define USE_TERRAIN ' + useTerrain + '\n#define SHAPE_MODE ' + shapeMode + '\n' + meta.source + helpers.FS_FOOTER;
+  return header + '#define USE_TERRAIN ' + terrain + '\n#define SHAPE_MODE ' + shape + '\n' +
+    meta.source + helpers.FS_FOOTER;
+}
+
+// One variant, exactly like runner.js makeJob/advanceJob: with the extension it
+// compiles+links on driver threads and is polled; without it the calls block.
+// `steps` arrays report where the wall time actually went.
+function compileVariant(gl, ext, meta, terrain, shape, cb){
+  const src = buildSource(meta, terrain, shape);
   const t0 = performance.now();
   let vs = null, fs = null, prog = null;
-  let vsTime = 0, fsTime = 0, linkTime = 0, ok = true, err = '';
+  const st = { id: meta.id, key: terrain + ':' + shape, ok: true, err: '',
+    srcLen: src.length, lines: src.split('\n').length,
+    compileCall: 0, linkCall: 0, pollMax: 0, polls: 0, total: 0, async: !!ext };
   try {
     let t = performance.now();
     vs = gl.createShader(gl.VERTEX_SHADER);
-    gl.shaderSource(vs, helpers.VS);
+    gl.shaderSource(vs, window.Runner.helpers.VS);
     gl.compileShader(vs);
-    vsTime = performance.now() - t;
-    if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
-      err = 'VS compile failed: ' + gl.getShaderInfoLog(vs);
-      ok = false;
-      return result();
-    }
-
-    t = performance.now();
     fs = gl.createShader(gl.FRAGMENT_SHADER);
     gl.shaderSource(fs, src);
     gl.compileShader(fs);
-    if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
-      fsTime = performance.now() - t;
-      err = 'FS compile failed: ' + gl.getShaderInfoLog(fs) + '\n--- source length ' + src.length + ' lines ' + src.split('\n').length;
-      ok = false;
-      return result();
-    }
-    fsTime = performance.now() - t;
+    st.compileCall = performance.now() - t;
 
-    t = performance.now();
-    prog = gl.createProgram();
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      linkTime = performance.now() - t;
-      err = 'LINK failed: ' + gl.getProgramInfoLog(prog);
-      ok = false;
-      return result();
+    if (ext && typeof ext.COMPLETION_STATUS_KHR === 'number') {
+      // async path — poll like the app does
+      (function poll(){
+        const t1 = performance.now();
+        const vsDone = gl.getShaderParameter(vs, ext.COMPLETION_STATUS_KHR);
+        const pollMs = performance.now() - t1;
+        if (pollMs > st.pollMax) st.pollMax = pollMs;
+        st.polls++;
+        if (typeof vsDone !== 'boolean') { fail('driver rejected COMPLETION_STATUS_KHR (' + typeof vsDone + ')'); return; }
+        if (!vsDone) return setTimeout(poll, 16);
+        const fsDone = gl.getShaderParameter(fs, ext.COMPLETION_STATUS_KHR);
+        if (typeof fsDone !== 'boolean') { fail('driver rejected COMPLETION_STATUS_KHR'); return; }
+        if (!fsDone) return setTimeout(poll, 16);
+        link();
+      })();
+    } else {
+      // no extension — the status queries below block until done
+      if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) fail('VS: ' + gl.getShaderInfoLog(vs));
+      else if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) fail('FS: ' + gl.getShaderInfoLog(fs));
+      else link();
     }
-    linkTime = performance.now() - t;
+
+    function link(){
+      if (st.err || !st.ok) return;
+      const t = performance.now();
+      prog = gl.createProgram();
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
+      gl.linkProgram(prog);
+      st.linkCall = performance.now() - t;
+      if (ext && typeof ext.COMPLETION_STATUS_KHR === 'number') {
+        (function pollLink(){
+          const t1 = performance.now();
+          const done = gl.getProgramParameter(prog, ext.COMPLETION_STATUS_KHR);
+          const pollMs = performance.now() - t1;
+          if (pollMs > st.pollMax) st.pollMax = pollMs;
+          st.polls++;
+          if (typeof done !== 'boolean') { fail('link poll rejected COMPLETION_STATUS_KHR'); return; }
+          if (!done) return setTimeout(pollLink, 16);
+          if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) fail('LINK: ' + gl.getProgramInfoLog(prog));
+          else finish();
+        })();
+      } else {
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) fail('LINK: ' + gl.getProgramInfoLog(prog));
+        else finish();
+      }
+    }
+
+    function fail(msg){ st.ok = false; st.err = msg; finish(); }
+    function finish(){
+      st.total = performance.now() - t0;
+      try { if (vs) gl.deleteShader(vs); } catch(e){}
+      try { if (fs) gl.deleteShader(fs); } catch(e){}
+      try { if (prog) gl.deleteProgram(prog); } catch(e){}
+      cb(st);
+    }
   } catch (e) {
-    err = 'exception: ' + e.message + '\n' + e.stack;
-    ok = false;
-  } finally {
-    if (vs) gl.deleteShader(vs);
-    if (fs) gl.deleteShader(fs);
-    if (prog) gl.deleteProgram(prog);
-  }
-  return result();
-
-  function result(){
-    return {id: meta.id, ok: ok, vsTime: vsTime, fsTime: fsTime, linkTime: linkTime,
-      total: performance.now() - t0, err: err, srcLen: src.length, lines: src.split('\n').length,
-      terrain: !!terrain, shape: shapeMode};
+    st.ok = false; st.err = 'exception: ' + e.message;
+    st.total = performance.now() - t0;
+    cb(st);
   }
 }
 
-function runAll(){
-  clearLog();
-  const canvas = document.getElementById('c');
-  const gl = canvas.getContext('webgl2');
-  if(!gl){ log('WebGL2 not supported'); return; }
-  const list = window.SHADERS||[];
-  log('Found '+list.length+' shaders');
-  log('GL vendor: '+gl.getParameter(gl.VENDOR));
-  log('GL renderer: '+gl.getParameter(gl.RENDERER));
-  log('GL version: '+gl.getParameter(gl.VERSION));
-  log('GLSL version: '+gl.getParameter(gl.SHADING_LANGUAGE_VERSION));
-  log('KHR_parallel_shader_compile: ' + (gl.getExtension('KHR_parallel_shader_compile') ? 'available (the app compiles variants in the background)' : 'unavailable (variant switches block)'));
-  log('');
-  let results=[];
-  for(let i=0;i<list.length;i++){
-    const meta = list[i];
-    statusEl.textContent = 'compiling '+meta.id+' ('+(i+1)+'/'+list.length+')';
-    const r = compileOne(gl, meta);
-    results.push(r);
-    log('['+meta.id+'] srcLen='+r.srcLen+' lines='+r.lines+' total='+(r.total|0)+'ms vs='+ (r.vsTime|0)+' fs='+ (r.fsTime|0)+' link='+(r.linkTime|0)+' ok='+r.ok);
-    if(!r.ok){
-      log('  ERROR:\n'+r.err.slice(0,2000));
-      if (gl.isContextLost && gl.isContextLost()) { log('  WebGL context lost; stopping.'); break; }
-    }
+function fmtRow(r){
+  return '[' + r.id + ' t' + r.key + '] len=' + r.srcLen + ' lines=' + r.lines +
+    ' total=' + (r.total|0) + 'ms' +
+    ' compileCall=' + (r.compileCall|0) + 'ms' +
+    ' linkCall=' + (r.linkCall|0) + 'ms' +
+    (r.async ? ' pollMax=' + r.pollMax.toFixed(1) + 'ms polls=' + r.polls : ' [SYNC]') +
+    ' ok=' + r.ok +
+    (r.err ? '  ERR: ' + r.err.slice(0,300) : '');
+}
+
+function ctxInfo(gl){
+  const ext = gl.getExtension('KHR_parallel_shader_compile');
+  log('GL vendor: ' + gl.getParameter(gl.VENDOR));
+  log('GL renderer: ' + gl.getParameter(gl.RENDERER));
+  log('GL version: ' + gl.getParameter(gl.VERSION));
+  log('GLSL version: ' + gl.getParameter(gl.SHADING_LANGUAGE_VERSION));
+  log('KHR_parallel_shader_compile: ' + (ext ? 'available' : 'unavailable (variant switches block!)'));
+  if (ext) {
+    log('  ext.COMPLETION_STATUS_KHR = ' + ext.COMPLETION_STATUS_KHR +
+      (typeof gl.COMPLETION_STATUS_KHR === 'number'
+        ? ' ; context exposes the same enum (0x' + gl.COMPLETION_STATUS_KHR.toString(16) + ')'
+        : ' ; context does NOT expose gl.COMPLETION_STATUS_KHR (this was the INVALID_ENUM cause)'));
   }
-  statusEl.textContent='done';
-  // summary slow
-  results.sort((a,b)=>b.total-a.total);
-  log('\n--- slowest first ---');
-  for(let r of results) log(r.id+': '+ (r.total|0)+'ms (fs '+(r.fsTime|0)+' link '+(r.linkTime|0)+') ok='+r.ok);
+  return ext;
+}
+
+function runList(list, label, cb){
+  clearLog();
+  const gl = document.getElementById('c').getContext('webgl2');
+  if (!gl) { log('WebGL2 not supported'); return; }
+  const ext = ctxInfo(gl);
+  log('');
+  log(label);
+  const results = [];
+  let i = 0;
+  (function next(){
+    if (i >= list.length) {
+      statusEl.textContent = 'done';
+      results.sort((a,b)=>b.total-a.total);
+      log('\n--- slowest first ---');
+      for (const r of results) log(r.id + ' t' + r.key + ': ' + (r.total|0) + 'ms' + (r.err ? ' FAILED' : ''));
+      if (cb) cb(results);
+      return;
+    }
+    const meta = list[i++];
+    statusEl.textContent = 'compiling ' + meta.id + ' (' + i + '/' + list.length + ')';
+    compileVariant(gl, ext, meta, 0, SHAPE.sphere, function(r){
+      results.push(r);
+      log(fmtRow(r));
+      if (!r.ok && gl.isContextLost && gl.isContextLost()) { log('  WebGL context lost; stopping.'); statusEl.textContent='done'; return; }
+      setTimeout(next, 16);
+    });
+  })();
+}
+
+function runAll(){
+  const gl = document.getElementById('c').getContext('webgl2');
+  if (!gl) { log('WebGL2 not supported'); return; }
+  const ext = ctxInfo(gl);
+  log('Found ' + (window.SHADERS||[]).length + ' shaders');
+  const order = ['hollow_bubbles','thick_raymarch','thick_chain','analytic_layers','thick_glass','thick_analytic','multi_fresnel','multi_thinfilm','XdXXzB','llsSDf','ld3SDl'];
+  const byId = {}; for (const s of (window.SHADERS||[])) byId[s.id] = s;
+  runList(order.map(id=>byId[id]).filter(Boolean), 'Compiling every shader, terrain=0 shape=sphere (the default boot programs):');
 }
 
 function runSeq(){
   clearLog();
-  const canvas = document.getElementById('c');
-  const gl = canvas.getContext('webgl2');
-  if(!gl){ log('WebGL2 not supported'); return; }
+  const gl = document.getElementById('c').getContext('webgl2');
+  if (!gl) { log('WebGL2 not supported'); return; }
+  const ext = ctxInfo(gl);
   const order = ['hollow_bubbles','thick_raymarch','thick_chain','analytic_layers','thick_analytic','thick_glass','multi_fresnel','multi_thinfilm'];
-  const byId = {};
-  for(let s of (window.SHADERS||[])) byId[s.id]=s;
-  let list = order.map(id=>byId[id]).filter(Boolean);
-  log('Compiling first 5 in order (simulates startup):');
-  for(let i=0;i<Math.min(5,list.length);i++){
-    const meta=list[i];
-    statusEl.textContent='compiling '+meta.id;
-    const t0=performance.now();
-    const r=compileOne(gl, meta);
-    const dt=performance.now()-t0;
-    log('['+meta.id+'] '+(dt|0)+'ms ok='+r.ok+' fs='+(r.fsTime|0)+' link='+(r.linkTime|0));
-    if(!r.ok) {
-      log('  '+r.err.slice(0,2000));
-      if (gl.isContextLost && gl.isContextLost()) { log('  WebGL context lost; stopping.'); break; }
-    }
+  const byId = {}; for (const s of (window.SHADERS||[])) byId[s.id] = s;
+  runList(order.map(id=>byId[id]).filter(Boolean), 'Compiling in startup order (simulates scene/shape clicks):');
+}
+
+// every compiled variant of the first scene shader — this is what background
+// priming produces at boot and what a shape/terrain click has to compile
+function runVariants(){
+  clearLog();
+  const gl = document.getElementById('c').getContext('webgl2');
+  if (!gl) { log('WebGL2 not supported'); return; }
+  const ext = ctxInfo(gl);
+  const list = (window.SHADERS||[]).filter(s=>s.group==='scene');
+  const meta = list[0];
+  log('All variants of "' + meta.id + '" (terrain x shape):');
+  const variants = [];
+  for (let t = 0; t <= 1; t++) {
+    for (let s = 0; s <= 3; s++) variants.push({ terrain: t, shape: s });
   }
-  statusEl.textContent='done';
+  const results = [];
+  let i = 0;
+  (function next(){
+    if (i >= variants.length) {
+      statusEl.textContent = 'done';
+      results.sort((a,b)=>b.total-a.total);
+      log('\n--- slowest variant first ---');
+      for (const r of results) log(r.id + ' t' + r.key + ': ' + (r.total|0) + 'ms' + (r.err ? ' FAILED' : ''));
+      return;
+    }
+    const v = variants[i++];
+    statusEl.textContent = 'compiling ' + meta.id + ' t' + v.terrain + ':' + v.shape + ' (' + i + '/' + variants.length + ')';
+    compileVariant(gl, ext, meta, v.terrain, v.shape, function(r){
+      results.push(r);
+      log(fmtRow(r));
+      setTimeout(next, 16);
+    });
+  })();
 }
 
 document.getElementById('runAll').addEventListener('click', runAll);
 document.getElementById('runSeq').addEventListener('click', runSeq);
+document.getElementById('runVariants').addEventListener('click', runVariants);
 document.getElementById('clear').addEventListener('click', clearLog);
 
-// auto run on load if ?auto=1
-if(location.search.indexOf('auto')>=0) setTimeout(runAll, 500);
+if (location.search.indexOf('auto')>=0) setTimeout(runAll, 500);
 </script>
 </body>
 </html>

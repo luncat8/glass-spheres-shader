@@ -175,21 +175,22 @@ vec3 traceMembranes (vec3 ro0, vec3 rd0, float landT,
 \tvec3 col = vec3 (0.0);
 \tvec3 tp = vec3 (1.0);
 \tvec3 bend = vec3 (0.0);
-\tint layers = int (uLayers + 0.5);
+\tint layers = clamp (int (uLayers + 0.5), 1, 10);
 \tfirstT = BIG;
 \tvec3 ro = ro0;
 \tvec3 rd = rd0;
 
-\tfor (int L = 0; L < 10; L++) {
-\t\tif (L >= layers) break;
-
+\t// Both loop bounds come from uniforms: ANGLE's HLSL translator tries to
+\t// unroll constant-bound loops, and a 10 x 32 unroll of shapeHit is what
+\t// made first compiles take seconds on Windows.
+\tint nBub = min (uCount, MAXB);
+\tfor (int L = 0; L < layers; L++) {
 \t\tfloat bestT = BIG;
 \t\tint bi = -1;
 \t\tbool entering = true;
 \t\tvec3 bestN = vec3 (0.0);
 \t\tvec3 nA, nB;
-\t\tfor (int i = 0; i < MAXB; i++) {
-\t\t\tif (i >= uCount) break;
+\t\tfor (int i = 0; i < nBub; i++) {
 \t\t\tvec2 h = shapeHit (uShape, ro, rd, uBubbles[i], uSpin[i], nA, nB);
 \t\t\tif (h.y < h.x) continue;
 \t\t\tbool ent = h.x > EPS;

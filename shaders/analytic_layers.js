@@ -65,6 +65,7 @@ ${GLSL.land}
 
 #define MAX_INSIDE 61
 #define MAX_TOP 3
+#define LAYERS 3
 #define EPS 0.002
 #define GOLDEN 0.61803398875
 
@@ -78,98 +79,79 @@ vec3 filmTint (float phase) {
 }
 
 // One object layer: entry/exit depths, outward normals there, the object and
-// its id; kind 0 = glass object, 1 = opaque top ball of the cage.
-// Flattened to scalars/vectors on purpose: the same data as a 7-field struct
-// returned by value and shuffled through inout parameters linked in tens of
-// seconds on some integrated-GPU drivers. Plain out/inout scalars and vectors
-// keep the translator off its struct-copy slow path.
-void setHit (out float t, out float tx, out vec3 n, out vec3 nx, out vec4 sph, out float id, out float kind,
-             float t_, float tx_, vec3 n_, vec3 nx_, vec4 sph_, float id_, float kind_) {
-	t = t_;
-	tx = tx_;
-	n = n_;
-	nx = nx_;
-	sph = sph_;
-	id = id_;
-	kind = kind_;
-}
-
-void noHit (out float t, out float tx, out vec3 n, out vec3 nx, out vec4 sph, out float id, out float kind) {
-	t = BIG;
-	tx = BIG;
-	n = vec3 (0.0, 1.0, 0.0);
-	nx = vec3 (0.0, 1.0, 0.0);
-	sph = vec4 (0.0);
-	id = -1.0;
-	kind = -1.0;
-}
-
-// Keep only the nearest three layers. Three transparent shells are enough to
-// preserve overlap depth without multiplying work by layer count.
-void addHit (float t, float tx, vec3 n, vec3 nx, vec4 sph, float id, float kind,
-             inout float t0, inout float tx0, inout vec3 n0, inout vec3 nx0, inout vec4 sph0, inout float id0, inout float kind0,
-             inout float t1, inout float tx1, inout vec3 n1, inout vec3 nx1, inout vec4 sph1, inout float id1, inout float kind1,
-             inout float t2, inout float tx2, inout vec3 n2, inout vec3 nx2, inout vec4 sph2, inout float id2, inout float kind2) {
-	if (t < t0) {
-		setHit (t2, tx2, n2, nx2, sph2, id2, kind2, t1, tx1, n1, nx1, sph1, id1, kind1);
-		setHit (t1, tx1, n1, nx1, sph1, id1, kind1, t0, tx0, n0, nx0, sph0, id0, kind0);
-		setHit (t0, tx0, n0, nx0, sph0, id0, kind0, t, tx, n, nx, sph, id, kind);
+// its id; kind 0 = glass object, 1 = opaque top ball of the cage. Layers are
+// stored as plain fixed-size arrays, index 0 = nearest. No structs and no
+// 28-inout-parameter functions: both made this function the slowest link in
+// the project (tens of seconds on some ANGLE/Windows drivers).
+void pushLayer (inout vec2 span[LAYERS], inout vec3 n[LAYERS], inout vec3 nx[LAYERS],
+                inout vec4 sph[LAYERS], inout vec2 mk[LAYERS],
+                vec2 h, vec3 na, vec3 nb, vec4 sp, vec2 m) {
+	if (h.x < span[0].x) {
+		span[2] = span[1]; n[2] = n[1]; nx[2] = nx[1]; sph[2] = sph[1]; mk[2] = mk[1];
+		span[1] = span[0]; n[1] = n[0]; nx[1] = nx[0]; sph[1] = sph[0]; mk[1] = mk[0];
+		span[0] = h; n[0] = na; nx[0] = nb; sph[0] = sp; mk[0] = m;
 		return;
 	}
-	if (t < t1) {
-		setHit (t2, tx2, n2, nx2, sph2, id2, kind2, t1, tx1, n1, nx1, sph1, id1, kind1);
-		setHit (t1, tx1, n1, nx1, sph1, id1, kind1, t, tx, n, nx, sph, id, kind);
+	if (h.x < span[1].x) {
+		span[2] = span[1]; n[2] = n[1]; nx[2] = nx[1]; sph[2] = sph[1]; mk[2] = mk[1];
+		span[1] = h; n[1] = na; nx[1] = nb; sph[1] = sp; mk[1] = m;
 		return;
 	}
-	if (t < t2) setHit (t2, tx2, n2, nx2, sph2, id2, kind2, t, tx, n, nx, sph, id, kind);
+	if (h.x < span[2].x) {
+		span[2] = h; n[2] = na; nx[2] = nb; sph[2] = sp; mk[2] = m;
+	}
 }
 
-// the object's hit as a layer; a ray starting inside sees the exit surface
+// the object's hit as a layer; a ray starting inside sees the exit surface.
+// span = (t, tx), mk = (id, kind).
 bool objectHit (int shape, vec3 ro, vec3 rd, vec4 obj, vec4 spin, float id, float kind,
-                out float t, out float tx, out vec3 n, out vec3 nx, out vec4 sph, out float oid, out float okind) {
-	noHit (t, tx, n, nx, sph, oid, okind);
+                out vec2 span, out vec3 n, out vec3 nx, out vec4 sph, out vec2 mk) {
+	span = vec2 (BIG);
+	n = vec3 (0.0, 1.0, 0.0);
+	nx = n;
+	sph = vec4 (0.0);
+	mk = vec2 (-1.0);
 	vec3 nA, nB;
 	vec2 th = shapeHit (shape, ro, rd, obj, spin, nA, nB);
 	if (th.y <= EPS || th.y < th.x) return false;
 	bool outside = th.x > EPS;
-	t = outside ? th.x : th.y;
+	span = outside ? vec2 (th.x, th.y) : vec2 (th.y, th.y);
 	n = outside ? nA : -nB;
-	tx = th.y;
 	nx = nB;
 	sph = obj;
-	oid = id;
-	okind = kind;
+	mk = vec2 (id, kind);
 	return true;
 }
 
+// Keep only the nearest LAYERS layers. Three transparent shells are enough to
+// preserve overlap depth without multiplying work by layer count. The loops
+// are bounded by uniforms (uCount / uTopCount), never constants, so the
+// driver compiles a real loop instead of unrolling it (ANGLE + FXC).
 void sphereHits (vec3 ro, vec3 rd,
-                 out float t0, out float tx0, out vec3 n0, out vec3 nx0, out vec4 sph0, out float id0, out float kind0,
-                 out float t1, out float tx1, out vec3 n1, out vec3 nx1, out vec4 sph1, out float id1, out float kind1,
-                 out float t2, out float tx2, out vec3 n2, out vec3 nx2, out vec4 sph2, out float id2, out float kind2) {
-	noHit (t0, tx0, n0, nx0, sph0, id0, kind0);
-	noHit (t1, tx1, n1, nx1, sph1, id1, kind1);
-	noHit (t2, tx2, n2, nx2, sph2, id2, kind2);
-	float t, tx, id, kind;
-	vec3 n, nx;
-	vec4 sph;
-	for (int i = 0; i < MAX_INSIDE; i++) {
-		if (i >= uCount) break;
-		if (objectHit (uShape, ro, rd, uInside[i], uSpin[i], float (i), 0.0, t, tx, n, nx, sph, id, kind)) {
-			addHit (t, tx, n, nx, sph, id, kind,
-			        t0, tx0, n0, nx0, sph0, id0, kind0,
-			        t1, tx1, n1, nx1, sph1, id1, kind1,
-			        t2, tx2, n2, nx2, sph2, id2, kind2);
+                 out vec2 span[LAYERS], out vec3 n[LAYERS], out vec3 nx[LAYERS],
+                 out vec4 sph[LAYERS], out vec2 mk[LAYERS]) {
+	for (int i = 0; i < LAYERS; i++) {
+		span[i] = vec2 (BIG);
+		n[i] = vec3 (0.0, 1.0, 0.0);
+		nx[i] = n[i];
+		sph[i] = vec4 (0.0);
+		mk[i] = vec2 (-1.0);
+	}
+	vec2 h;
+	vec3 na, nb;
+	vec4 sp;
+	vec2 m;
+	int nInside = min (uCount, MAX_INSIDE);
+	for (int i = 0; i < nInside; i++) {
+		if (objectHit (uShape, ro, rd, uInside[i], uSpin[i], float (i), 0.0, h, na, nb, sp, m)) {
+			pushLayer (span, n, nx, sph, mk, h, na, nb, sp, m);
 		}
 	}
 	// the balls on top belong to the cage scene only, and stay spheres
-	int topN = (uScene == 3) ? uTopCount : 0;
-	for (int i = 0; i < MAX_TOP; i++) {
-		if (i >= topN) break;
-		if (objectHit (SHAPE_SPHERE, ro, rd, uTop[i], vec4 (0.0), float (i), 1.0, t, tx, n, nx, sph, id, kind)) {
-			addHit (t, tx, n, nx, sph, id, kind,
-			        t0, tx0, n0, nx0, sph0, id0, kind0,
-			        t1, tx1, n1, nx1, sph1, id1, kind1,
-			        t2, tx2, n2, nx2, sph2, id2, kind2);
+	int topN = (uScene == 3) ? min (uTopCount, MAX_TOP) : 0;
+	for (int i = 0; i < topN; i++) {
+		if (objectHit (SHAPE_SPHERE, ro, rd, uTop[i], vec4 (0.0), float (i), 1.0, h, na, nb, sp, m)) {
+			pushLayer (span, n, nx, sph, mk, h, na, nb, sp, m);
 		}
 	}
 }
@@ -213,12 +195,11 @@ vec3 shadeSphere (vec3 behind, vec3 ro, vec3 rd, float t, float tx, vec3 n, vec3
 }
 
 vec3 trace (vec3 ro, vec3 rd) {
-	float t0, tx0, id0, kind0, t1, tx1, id1, kind1, t2, tx2, id2, kind2;
-	vec3 n0, nx0, n1, nx1, n2, nx2;
-	vec4 sph0, sph1, sph2;
-	sphereHits (ro, rd, t0, tx0, n0, nx0, sph0, id0, kind0,
-	            t1, tx1, n1, nx1, sph1, id1, kind1,
-	            t2, tx2, n2, nx2, sph2, id2, kind2);
+	vec2 span[LAYERS];
+	vec3 n[LAYERS], nx[LAYERS];
+	vec4 sph[LAYERS];
+	vec2 mk[LAYERS];
+	sphereHits (ro, rd, span, n, nx, sph, mk);
 	float wireT = BIG, wireMask = 0.0;
 	// the wire cube is world-space geometry, so it only exists in the cage scene
 	if (uScene == 3) cageWireHit (ro, rd, wireT, wireMask);
@@ -234,23 +215,23 @@ vec3 trace (vec3 ro, vec3 rd) {
 		if (lid < 0) landT = BIG;
 		else col = landShade (ro, rd, landT, ln, lid);
 	}
-	if (landT < t2) noHit (t2, tx2, n2, nx2, sph2, id2, kind2);
-	if (landT < t1) noHit (t1, tx1, n1, nx1, sph1, id1, kind1);
-	if (landT < t0) noHit (t0, tx0, n0, nx0, sph0, id0, kind0);
+	for (int i = 0; i < LAYERS; i++) {
+		if (landT < span[i].x) mk[i].y = -1.0;
+	}
 	bool wireDone = wireMask <= 0.0;
 	// Compose from far to near. The wire is inserted at its measured ray depth
 	// instead of being an always-on-top screen overlay.
-	if (kind2 >= 0.0) {
-		if (!wireDone && wireT > t2) { col = cageDrawWire (col, wireMask); wireDone = true; }
-		col = shadeSphere (col, ro, rd, t2, tx2, n2, nx2, sph2, id2, kind2);
+	if (mk[2].y >= 0.0) {
+		if (!wireDone && wireT > span[2].x) { col = cageDrawWire (col, wireMask); wireDone = true; }
+		col = shadeSphere (col, ro, rd, span[2].x, span[2].y, n[2], nx[2], sph[2], mk[2].x, mk[2].y);
 	}
-	if (kind1 >= 0.0) {
-		if (!wireDone && wireT > t1) { col = cageDrawWire (col, wireMask); wireDone = true; }
-		col = shadeSphere (col, ro, rd, t1, tx1, n1, nx1, sph1, id1, kind1);
+	if (mk[1].y >= 0.0) {
+		if (!wireDone && wireT > span[1].x) { col = cageDrawWire (col, wireMask); wireDone = true; }
+		col = shadeSphere (col, ro, rd, span[1].x, span[1].y, n[1], nx[1], sph[1], mk[1].x, mk[1].y);
 	}
-	if (kind0 >= 0.0) {
-		if (!wireDone && wireT > t0) { col = cageDrawWire (col, wireMask); wireDone = true; }
-		col = shadeSphere (col, ro, rd, t0, tx0, n0, nx0, sph0, id0, kind0);
+	if (mk[0].y >= 0.0) {
+		if (!wireDone && wireT > span[0].x) { col = cageDrawWire (col, wireMask); wireDone = true; }
+		col = shadeSphere (col, ro, rd, span[0].x, span[0].y, n[0], nx[0], sph[0], mk[0].x, mk[0].y);
 	}
 	if (!wireDone) col = cageDrawWire (col, wireMask);
 	return col;

@@ -1,81 +1,82 @@
-# current status
-
-WebGL: INVALID_ENUM: getShaderParameter: invalid parameter name
-
-if i use
-if (gl.COMPLETION_STATUS_KHR) ensurePoll();
-...
-
-it freeze at start
-
-also need better investigate what really took so long time to startup these scenes or object type switching
-
-# Compile slowness investigation
+# Compile performance — status and how to measure it
 
 ## Reported symptom
-- Switching shape took 2–3 s and choosing the glass-land (terrain) scene was very
-  long, because each new scene/shape variant was compiled and linked on the main
-  thread, freezing the page.
-- The first compile of the scene-aware shaders was extremely slow on some
-  drivers (`analytic_layers` linked in ~20 s on an integrated GPU even for the
-  default sphere/sky program); after a successful compile the driver cache made
-  the same variant fast again.
-- A fast result (e.g. `hollow_bubbles` at 6 ms) only meant that variant had
-  already been compiled earlier in the session.
+- Switching shape / scene took 2–3 s and choosing the glass-land scene was very
+  long: every new variant was compiled and linked by the driver.
+- `analytic_layers` linked in ~20 s on an integrated-GPU driver even for the
+  default sphere program; after one successful compile the driver cache made
+  the same variant fast again. So the cost is driver-side compilation, not
+  rendering, and it is CPU-bound: an RTX 3060 does not help.
+- `WebGL: INVALID_ENUM: getShaderParameter: invalid parameter name` and a
+  freeze at startup when polling with `gl.COMPLETION_STATUS_KHR`.
 
-## Cause
-The shape and heightmap work added a large amount of optional GLSL to every
-scene-aware program. The default checker scene still handed the driver the
-simplex terrain marcher, lake refraction, cube/tetra code and knot SDF. Some
-WebKit/Chromium drivers optimise those dynamic branches while answering
-`COMPILE_STATUS` or `LINK_STATUS`; on failure the context could then make later
-programs fail too.
+## Root causes found (and fixed here)
 
-Making terrain/shape compile-time variants (`USE_TERRAIN`, `SHAPE_MODE`) cut the
-unreachable code out of the default program, but it did not remove the freeze:
-every first switch to a new shape or to the terrain scene still compiled a fresh
-whole-program variant synchronously on the main thread, and the driver cache
-keys on the final source, so each distinct variant is a fresh link.
+### 1. The completion enum was taken from the wrong object
+`COMPLETION_STATUS_KHR` is a member of the *extension object*, not of the
+context on every implementation (`ext.COMPLETION_STATUS_KHR`, per the WebGL
+extension spec; MDN sample code queries `gl.getProgramParameter(p,
+ext.COMPLETION_STATUS_KHR)`). Passing `gl.COMPLETION_STATUS_KHR` where that
+property is undefined produces exactly the reported INVALID_ENUM. The runner
+now stores the extension object at `init()` and polls with
+`Runner.completionStatus`; a non-boolean answer from the driver fails the job
+with a readable error instead of polling forever.
 
-## Current mitigation
-- `GLSL.simplex` and the full `GLSL.land` implementation are guarded by
-  `USE_TERRAIN`. Non-terrain programs get small no-op land entry points instead
-  of the 64-step marcher.
-- `GLSL.shape` is guarded by `SHAPE_MODE`. The default sphere program does not
-  compile cube, tetra or knot implementations.
-- `js/runner.js` compiles and links variants asynchronously through
-  `KHR_parallel_shader_compile` where the browser offers it. While a new variant
-  links on driver threads, the previous program keeps rendering and the swap
-  happens only once the new program has actually linked — switching shape,
-  scene or shader no longer freezes the page. Without the extension the old
-  synchronous behaviour is preserved instead of regressed.
-- `js/runner.js` also primes variants in the background: once a shader is
-  active it compiles the other shapes and the glass-land (terrain) variant of
-  the current shape, one at a time, so a later scene/shape click usually finds a
-  linked program already waiting (instant). The terrain variant is primed first
-  because it is the most expensive switch.
-- The old program is kept until a new one has linked; a failed or superseded
-  compile is cleaned up and never overwrites a newer user choice, so one failure
-  does not cascade into the next selection.
-- `analytic_layers` no longer models its nearest-three-layers with a `Hit`
-  struct returned by value and shuffled through `inout` struct parameters: that
-  was the one structural difference between it (20 s link) and `hollow_bubbles`
-  (6 ms link) sharing the same GLSL, and it forced the driver's translator down
-  its struct-copy slow path. The layers are now flat out/inout scalars and
-  vectors, which link like the other scene shaders.
-- `debug.html` reports whether `KHR_parallel_shader_compile` is available and
-  keeps timing the raw compile/link of the default variants.
+### 2. Startup was still synchronous
+`Runner.select()` built the first program with `finishJobSync()` on the boot
+path, and `getShaderParameter(COMPILE_STATUS)`/`LINK_STATUS` block until the
+driver finishes — the startup freeze. Boot now goes through the same polled
+path as every shape/scene switch: the page stays responsive, `frame()` renders
+nothing until the program links, and the status line says "compiling…" until
+the swap.
 
-## Diagnostic tool
-1. Open `debug.html` via `file://` or `http://localhost`.
-2. Check the `KHR_parallel_shader_compile` line to confirm the app's async path
-   is available on this browser.
-3. Click **compile first 5 in sequence** to reproduce the startup order, or
-   **compile all shaders** for the complete table.
-4. Share the `fs`, `link`, `total`, and `ok` values if a default variant is
-   still slow.
+### 3. The driver unrolls constant-bound loops
+ANGLE (D3D/HLSL and Metal backends) tries to unroll `for (i < CONST)` loops;
+with `break` on a uniform it still attempts the unroll at compile time and
+FXC can spend tens of seconds on a 10 × 32 (hollow bubbles) or 48-step ×
+4-sphere-SDF (thick raymarch) unroll. Every object/march loop bound is now
+driven from a uniform with a clamped cap, so the trip count is unknown at
+compile time and the driver emits a real loop. Scene shaders use `uCount`,
+`uLayers`, `uTopCount`, `uLandSteps`, `uSteps`; the own/orig shaders use
+`uIterations`/`uAASamples` (`multi_thinfilm`, `ld3SDl`) and
+`uCellRange`/`uBlurSamples` (`llsSDf`). Runtime behaviour is unchanged: the
+same scales are the old maxima (the blur taps keep the original 0.8 total
+weight whatever the tap count).
 
-Terrain is intentionally compiled on demand because it is the expensive feature.
-If its first selection is still slow on an integrated GPU, choose the `32`
-land-step option; this changes rendering cost without making the normal startup
-pay for it.
+### 4. Struct/inout plumbing in `analytic_layers`
+The nearest-three-layers code was a 7-field struct returned by value and moved
+through `inout` struct parameters; then a flat version with 7 inout scalars
+per layer (28 parameters). Both shapes push ANGLE's translator into its slow
+path. Layers are now plain fixed-size arrays (`vec2 span[3]`, normals, sphere,
+`mk = (id, kind)`) with one small insert helper — no structs, no
+28-parameter functions.
+
+### 5. Hybrid-GPU laptops
+The WebGL context is now created with
+`powerPreference: 'high-performance'` so a laptop with an RTX 3060 plus an
+integrated GPU does not silently hand WebGL to the iGPU — a "good GPU" that
+the app never used.
+
+## What is left to verify (on Chrome 150 / RTX 3060+)
+
+1. `debug.html` reports whether `KHR_parallel_shader_compile` is available,
+   whether the context exposes `gl.COMPLETION_STATUS_KHR`, and per-stage
+   timing: `compileCall`, `linkCall`, and `pollMax` (a large `pollMax` means a
+   poll call is stalling — the extension is effectively synchronous there).
+2. `compile all shaders` shows the boot programs (terrain=0, sphere) — if any
+   is still > ~500 ms, the driver path is still slow and the remaining
+   candidates are the big shared libraries in `js/glsl_lib.js` (`GLSL.env`'s
+   four themes, `GLSL.cageOverlay`'s twelve wire edges) that every scene
+   program carries, and the per-pixel recursive `shapeHit` calls. What
+   remains constant-bound is only 2–4 iteration outer loops (`HOPS`,
+   `BOUNCES`, `NB`, the `LAYERS` pass, the 4-bisection refinements): they can
+   be unrolled safely because their bodies already run uniform-bound loops,
+   so there is no nested unroll to blow up.
+3. `compile every scene/shape variant of the first shader` reproduces what
+   background priming does; wait for the run and compare the slowest variant.
+4. First compile after browser start includes the driver's shader cache
+   miss; the second run on the same variant is expected to be fast — that is
+   not "fixed", it is the cache. Judge by the *first* run in a fresh profile.
+5. Startup and shape/scene switching should no longer freeze the page; the
+   status line stays "compiling…" until the swap. Report the `total`/`pollMax`
+   numbers instead of wall-clock guesses.

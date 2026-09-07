@@ -96,16 +96,15 @@ vec3 trace (vec3 ro, vec3 rd) {
 	vec3 col = vec3 (0.0);
 	vec3 tp = vec3 (1.0);
 	vec3 bend = vec3 (0.0);
-	int layers = int (uLayers + 0.5);
+	int layers = clamp (int (uLayers + 0.5), 1, 10);
+	int nB = min (uCount, MAXB);
 
-	for (int L = 0; L < 10; L++) {
-		if (L >= layers) break;
-
+	// uniform loop bounds keep ANGLE/HLSL from unrolling 10 x MAXB iterations
+	for (int L = 0; L < layers; L++) {
 		float bestT = BIG;
 		int bi = -1;
 		bool entering = true;
-		for (int i = 0; i < MAXB; i++) {
-			if (i >= uCount) break;
+		for (int i = 0; i < nB; i++) {
 			vec4 sp = uBubbles[i];
 			vec2 h = ray_sphere (ro, rd, sp.xyz, sp.w);
 			if (h.y < h.x) continue;

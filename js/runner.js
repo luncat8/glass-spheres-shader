@@ -132,6 +132,10 @@ void main() {
 		wantedKey: '',       // the variant the user most recently asked for
 		variants: Object.create(null), // compiled base/terrain/shape variants for current shader
 		parallel: false,      // KHR_parallel_shader_compile available (async compile/link)
+		parallelExt: null,    // the extension object; holds the only guaranteed enum
+		completionStatus: 0,  // ext.COMPLETION_STATUS_KHR — the ctx may not expose it
+		compileLog: [],       // small ring of finished jobs, for diagnostics
+		contextLost: false,
 		jobs: [],             // in-flight compile jobs
 		pendingSelect: null,  // select() waiting for its variant to link
 		primeQueue: [],       // variants to compile in the background, one at a time
@@ -324,7 +328,12 @@ void main() {
 	function finishJobSync(job) {
 		if (job.phase === 'done') return; // may be called again by a deferred tick
 		const gl = Runner.gl;
-		if (!gl) { job.stale = true; finishJob(job); return; }
+		if (!gl || Runner.contextLost || (gl.isContextLost && gl.isContextLost())) {
+			job.err = 'WebGL context lost during compile';
+			job.ok = false;
+			finishJob(job);
+			return;
+		}
 		if (gl.getShaderParameter(job.vs, gl.COMPILE_STATUS)) {
 			if (gl.getShaderParameter(job.fs, gl.COMPILE_STATUS)) {
 				job.prog = gl.createProgram();
@@ -351,9 +360,28 @@ void main() {
 	function advanceJob(job) {
 		const gl = Runner.gl;
 		if (!gl) { job.stale = true; finishJob(job); return true; }
+		// NOTE: a failed job sets ok=false but never stale — stale means
+		// "superseded by a newer selection" and would silently discard the
+		// error in select()'s callback, leaving the status on "compiling…".
+		if (Runner.contextLost || (gl.isContextLost && gl.isContextLost())) {
+			job.err = 'WebGL context lost during compile';
+			job.ok = false;
+			finishJob(job);
+			return true;
+		}
+		// COMPLETION_STATUS_KHR lives on the extension object, not on the
+		// context; passing the context's (possibly undefined) property here was
+		// an INVALID_ENUM on some drivers. A non-boolean answer means the enum
+		// was still rejected — fail loudly instead of polling forever.
+		const status = Runner.completionStatus;
+		if (!status) { job.err = 'COMPLETION_STATUS_KHR unavailable'; job.ok = false; finishJob(job); return true; }
 		if (job.phase === 'compile') {
-			if (!gl.getShaderParameter(job.vs, gl.COMPLETION_STATUS_KHR)) return false;
-			if (!gl.getShaderParameter(job.fs, gl.COMPLETION_STATUS_KHR)) return false;
+			const vsDone = gl.getShaderParameter(job.vs, status);
+			if (typeof vsDone !== 'boolean') { job.err = 'driver rejected COMPLETION_STATUS_KHR'; job.ok = false; finishJob(job); return true; }
+			if (!vsDone) return false;
+			const fsDone = gl.getShaderParameter(job.fs, status);
+			if (typeof fsDone !== 'boolean') { job.err = 'driver rejected COMPLETION_STATUS_KHR'; job.ok = false; finishJob(job); return true; }
+			if (!fsDone) return false;
 			if (!gl.getShaderParameter(job.vs, gl.COMPILE_STATUS)) {
 				job.err = 'vertex shader compile failed:\n' + gl.getShaderInfoLog(job.vs);
 				job.ok = false;
@@ -369,7 +397,9 @@ void main() {
 				return false;
 			}
 		} else if (job.phase === 'link') {
-			if (!gl.getProgramParameter(job.prog, gl.COMPLETION_STATUS_KHR)) return false;
+			const done = gl.getProgramParameter(job.prog, status);
+			if (typeof done !== 'boolean') { job.err = 'driver rejected COMPLETION_STATUS_KHR'; job.ok = false; finishJob(job); return true; }
+			if (!done) return false;
 			if (!gl.getProgramParameter(job.prog, gl.LINK_STATUS)) {
 				job.err = 'program link failed:\n' + gl.getProgramInfoLog(job.prog);
 				job.ok = false;
@@ -384,9 +414,19 @@ void main() {
 	function finishJob(job) {
 		const gl = Runner.gl;
 		job.phase = 'done';
-		if (job.vs) { gl.deleteShader(job.vs); job.vs = null; }
-		if (job.fs) { gl.deleteShader(job.fs); job.fs = null; }
+		if (job.vs) { try { gl.deleteShader(job.vs); } catch (e) {} job.vs = null; }
+		if (job.fs) { try { gl.deleteShader(job.fs); } catch (e) {} job.fs = null; }
 		const dt = (typeof performance !== 'undefined' && performance.now) ? (performance.now() - job.t0) : 0;
+		// diagnostics: remember the last finished jobs (never inside the frame loop)
+		Runner.compileLog.push({
+			id: job.meta.id,
+			key: job.key,
+			active: !!job.active,
+			ok: !!job.ok,
+			ms: Math.round(dt),
+			err: job.ok ? '' : String(job.err || 'compile abandoned').slice(0, 140),
+		});
+		if (Runner.compileLog.length > 48) Runner.compileLog.shift();
 		if (dt > 1000) {
 			try { console.log('[Runner] ' + job.meta.id + ' variant ' + job.key + ' ' + (job.active ? 'active' : 'background') + ' ready in ' + dt.toFixed(0) + 'ms' + (job.ok ? '' : ' FAILED')); } catch (e) {}
 		}
@@ -432,12 +472,14 @@ void main() {
 	function ensurePoll() {
 		if (pollScheduled) return;
 		pollScheduled = true;
+		// setTimeout instead of rAF: the poller must keep advancing even when
+		// the tab is hidden (rAF is throttled there), and it must not fight the
+		// render loop for a frame slot.
 		const tick = function () {
 			pollScheduled = false;
 			if (stepJobs()) ensurePoll();
 		};
-		if (typeof requestAnimationFrame === 'function') requestAnimationFrame(tick);
-		else setTimeout(tick, 16);
+		setTimeout(tick, 16);
 	}
 
 	function getUniformLocs(gl, prog, meta) {
@@ -533,19 +575,44 @@ void main() {
 		return [w, h];
 	}
 
-	function dateVec() {
+	// preallocated iDate buffer — no per-frame allocation (AGENTS.md)
+	const dateBuf = [0, 0, 0, 0];
+	function fillDate() {
 		const d = new Date();
-		return [d.getFullYear(), d.getMonth() + 1, d.getDate(), d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()];
+		dateBuf[0] = d.getFullYear();
+		dateBuf[1] = d.getMonth() + 1;
+		dateBuf[2] = d.getDate();
+		dateBuf[3] = d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
 	}
 
 	function init(canvas) {
 		Runner.canvas = canvas;
-		const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+		// high-performance: on hybrid-GPU laptops Chrome otherwise hands WebGL
+		// to the low-power integrated GPU, which is exactly the "slow on a
+		// good GPU" case. contextLost is tracked so in-flight compiles fail
+		// cleanly instead of polling forever.
+		const gl = canvas.getContext('webgl2', {
+			antialias: false,
+			preserveDrawingBuffer: true,
+			powerPreference: 'high-performance',
+		});
 		if (!gl) throw new Error('WebGL2 not supported');
 		Runner.gl = gl;
 		// Where supported, compile+link run on driver threads and are polled
-		// here instead of blocking the page (see makeJob below).
-		Runner.parallel = !!(gl.getExtension && gl.getExtension('KHR_parallel_shader_compile'));
+		// here instead of blocking the page (see makeJob below). The enum must
+		// come from the extension object: the context property is not exposed
+		// everywhere, and passing it un-enumerated gives INVALID_ENUM.
+		Runner.parallelExt = gl.getExtension && gl.getExtension('KHR_parallel_shader_compile');
+		Runner.completionStatus = Runner.parallelExt ? Runner.parallelExt.COMPLETION_STATUS_KHR : 0;
+		Runner.parallel = !!Runner.completionStatus;
+		canvas.addEventListener('webglcontextlost', function (e) {
+			e.preventDefault();
+			Runner.contextLost = true;
+			console.error('[Runner] WebGL context lost');
+		});
+		canvas.addEventListener('webglcontextrestored', function () {
+			Runner.contextLost = false;
+		});
 
 		// pre-allocated VAO (fullscreen tri via gl_VertexID)
 		const vao = gl.createVertexArray();
@@ -750,10 +817,11 @@ void main() {
 			primeVariants(meta);
 		});
 		pending.activeJob = job;
-		// Nothing is rendering yet (boot): build the first program right here so
-		// the axes, camera and picker see a fully loaded shader the moment this
-		// returns, exactly as before the async change.
-		if (!Runner.current) finishJobSync(job);
+		// Boot is async too. The previous synchronous finishJobSync here made
+		// getShaderParameter(COMPILE_STATUS) block until the driver finished
+		// compiling the first program — that is the startup freeze. frame()
+		// already renders nothing until the program links, so the swap can
+		// happen on the poller just like every later variant switch.
 		return meta;
 	}
 
@@ -885,8 +953,8 @@ void main() {
 		if (u.iFrameRate) gl.uniform1f(u.iFrameRate, dt > 0 ? 1.0 / dt : 0);
 		if (u.iMouse) gl.uniform4fv(u.iMouse, Runner.mouse);
 		if (u.iDate) {
-			const d = dateVec();
-			gl.uniform4f(u.iDate, d[0], d[1], d[2], d[3]);
+			fillDate();
+			gl.uniform4fv(u.iDate, dateBuf);
 		}
 		uploadShaderUniforms(gl, u, Runner.current, Runner.sceneTime);
 		bindChannel(gl, Runner.program, u, 0);
@@ -944,6 +1012,9 @@ void main() {
 			fps: smoothFps(),
 			frame: Runner.frame,
 			res: [Runner.canvas.width, Runner.canvas.height],
+			jobs: Runner.jobs.length,
+			parallel: Runner.parallel,
+			compiles: Runner.compileLog.length,
 		};
 	}
 
@@ -976,5 +1047,8 @@ void main() {
 	Object.defineProperty(api, 'current', { get: () => Runner.current });
 	Object.defineProperty(api, 'elapsed', { get: () => Runner.elapsed });
 	Object.defineProperty(api, 'sceneTime', { get: () => Runner.sceneTime });
+	// recent variant compiles {id, key, active, ok, ms, err} for the debug page
+	Object.defineProperty(api, 'compileLog', { get: () => Runner.compileLog });
+	Object.defineProperty(api, 'parallel', { get: () => Runner.parallel });
 	root.Runner = api;
 })(typeof window !== 'undefined' ? window : globalThis);

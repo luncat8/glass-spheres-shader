@@ -10,6 +10,10 @@ window.SHADER_llsSDf = {
   "url": "https://www.shadertoy.com/view/llsSDf",
   "channels": {},
   "music": true,
+  "params": [
+    { "name": "uCellRange", "type": "int", "def": 1, "hidden": true, "hint": "cell neighbourhood radius (uniform loop bound, keeps the driver from unrolling)" },
+    { "name": "uBlurSamples", "type": "int", "def": 4, "hidden": true, "hint": "blur tap count per axis (uniform loop bound, keeps the driver from unrolling)" }
+  ],
   "source":
 `vec2 uv;
 
@@ -107,13 +111,19 @@ vec4 Cells(vec2 p,vec2 move, in float numCells,in float count,float blur)
 {
     vec2 inp=p+move;
 	inp *= numCells;
-	float d = 1.0;
+    float d = 1.0;
     vec2 te;
     vec2 pos;
-	for (int xo = -1; xo <= 1; xo++)
+	// uniform bounds: ANGLE's HLSL translator unrolls constant-bound loops;
+	// a 3x3 unroll of the hash neighbourhood would be a slow link
+	int cellN = max (2*uCellRange + 1, 1);
+	int cellR = (cellN - 1) / 2;
+	for (int xi = 0; xi < cellN; xi++)
 	{
-		for (int yo = -1; yo <= 1; yo++)
+		int xo = xi - cellR;
+		for (int yi = 0; yi < cellN; yi++)
 		{
+			int yo = yi - cellR;
 			vec2 tp = floor(inp) + vec2(xo, yo);
             vec2 rr=mod(tp, numCells);
             tp=tp + (hash2a(rr,iTime*0.1)+hash2a(rr,iTime*0.1+0.25))*0.5;
@@ -135,12 +145,16 @@ vec4 Cells(vec2 p,vec2 move, in float numCells,in float count,float blur)
     if (d<0.04) uv=uv+te*(d)*2.0;
     if (blur>0.0001) {
         vec4 c=vec4(0.0);
-        for (float x=-1.0;x<1.0;x+=0.5) {
-            for (float y=-1.0;y<1.0;y+=0.5) {
+        int blurN = max (uBlurSamples, 1);
+        for (int bx = 0; bx < blurN; bx++) {
+            float x = -1.0 + float (bx) * (2.0 / float (blurN));
+            for (int by = 0; by < blurN; by++) {
+                float y = -1.0 + float (by) * (2.0 / float (blurN));
                 c+=booble(te+vec2(x,y)*blur,p,numCells);
             }
         }
-        return c*0.05;
+        // same total weight as the original 4x4 x 0.05 (0.8), whatever the tap count
+        return c*(0.8/float(blurN*blurN));
     }
 
     return booble(te,p,numCells);

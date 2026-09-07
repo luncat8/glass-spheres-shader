@@ -54,8 +54,8 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 	// nearest front hit and furthest back hit over all active bubbles
 	float tF = BIG, tB = -1.0;
 	int fi = -1, bi = -1;
-	for (int i = 0; i < MAXB; i++) {
-		if (i >= uCount) break;
+	int nB = min (uCount, MAXB);
+	for (int i = 0; i < nB; i++) {
 		vec4 sp = uBubbles[i];
 		vec2 h = ray_sphere (ro, rd, sp.xyz, sp.w);
 		if (h.y <= 0.0) continue;

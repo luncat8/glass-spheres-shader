@@ -59,8 +59,8 @@ float sdf (vec3 p) {
 	vec3 q = 0.1 * (noise3 (p + vec3 (0.0, iTime * 0.1, 0.0)) - 0.5);
 	vec3 pp = q + p;
 	float d = BIG;
-	for (int i = 0; i < MAXB; i++) {
-		if (i >= uCount) break;
+	int nB = min (uCount, MAXB);
+	for (int i = 0; i < nB; i++) {
 		vec4 sp = uBubbles[i];
 		d = smin (d, length (pp - sp.xyz) - sp.w, SMOOTH_K);
 	}
@@ -167,7 +167,8 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 
 	vec3 pos = ro;
 	bool hit = false;
-	for (int j = 0; j < ITERATIONS; j++) {
+	// uniform bound: keeps the ANGLE/HLSL translation from unrolling the loop
+	for (int j = 0; j < uSteps; j++) {
 		float t = DIST_SCALE * sdf (pos);
 		pos += t * rd;
 		hit = t < INTERSECTION_PRECISION;
@@ -219,7 +220,8 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 		],
 		"params": [
 			{ "name": "uCount", "type": "int", "def": 64 },
-			{ "name": "uScene", "type": "int", "def": 0 }
+			{ "name": "uScene", "type": "int", "def": 0 },
+			{ "name": "uSteps", "type": "int", "def": 20, "hidden": true }
 		]
 	}
 };

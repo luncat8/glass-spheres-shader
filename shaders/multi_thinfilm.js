@@ -20,7 +20,9 @@ window.SHADER_multi_thinfilm = {
     { "name": "uSpin", "type": "vec4", "count": 3, "feed": "spin" }
   ],
   "params": [
-    { "name": "uShape", "type": "int", "def": 0, "hidden": true }
+    { "name": "uShape", "type": "int", "def": 0, "hidden": true },
+    { "name": "uIterations", "type": "int", "def": 24, "hidden": true, "hint": "raymarch step budget (uniform loop bound, keeps the driver from unrolling)" },
+    { "name": "uAASamples", "type": "int", "def": 1, "hidden": true, "hint": "anti-alias sample count (uniform loop bound, keeps the driver from unrolling)" }
   ],
   "source":
 `${GLSL.raySphere}
@@ -34,8 +36,7 @@ ${GLSL.shape}
 */
 
 #define INTERSECTION_PRECISION 0.01
-#define ITERATIONS 24
-#define AA_SAMPLES 1
+#define ITERATIONS 24 // compile-time cap for the uniform uIterations bound
 #define BOUND 6.0
 #define DIST_SCALE 0.9
 
@@ -210,7 +211,6 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 	mat3 camMat = calcLookAtMatrix (ro, ta, 0.0);
 
 	float dh = (0.666 / iResolution.y);
-	const float rads = TWO_PI / float (AA_SAMPLES);
 
 	vec3 col = vec3 (0.0);
 	vec3 wavelengths0 = vec3 (1.0, 0.8, 0.6);
@@ -220,12 +220,18 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 
 	vec3 rds[WAVELENGTHS];
 
-	for (int samp = 0; samp < AA_SAMPLES; samp++) {
+	// uIterations/uAASamples are uniforms: ANGLE's HLSL translator unrolls
+	// constant-bound loops, and a 24-step unroll of the merged SDF would be a
+	// multi-second link; uniform-driven bounds keep them real loops.
+	int maxIter = min (uIterations, ITERATIONS);
+	int aa = max (uAASamples, 1);
+	float rads = TWO_PI / float (aa);
+	for (int samp = 0; samp < aa; samp++) {
 		vec2 dxy = dh * vec2 (cos (float (samp) * rads), sin (float (samp) * rads));
 		vec3 rd = normalize (camMat * vec3 (p.xy + dxy, 1.5));
 		vec3 pos = ro;
 		bool hit = false;
-		for (int j = 0; j < ITERATIONS; j++) {
+		for (int j = 0; j < maxIter; j++) {
 			float t = DIST_SCALE * sdf (pos);
 			pos += t * rd;
 			hit = t < INTERSECTION_PRECISION;
@@ -264,7 +270,7 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 		}
 	}
 
-	col /= float (AA_SAMPLES);
+	col /= float (aa);
 	fragColor = vec4 (contrast (col), 1.0);
 }
 `,

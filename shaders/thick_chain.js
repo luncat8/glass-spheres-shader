@@ -28,6 +28,7 @@ window.SHADER_thick_chain = {
 	"params": [
 		{ "name": "uScene", "type": "int", "def": 0, "hidden": true },
 		{ "name": "uShape", "type": "int", "def": 0, "hidden": true },
+		{ "name": "uSteps", "type": "int", "def": 48, "hidden": true, "hint": "raymarch step budget (uniform loop bound, keeps the driver from unrolling)" },
 		{ "name": "uSpread", "type": "float", "label": "spread", "min": 0.5, "max": 2.0, "step": 0.05, "def": 1.0, "scenes": ["checker", "rainbow", "colorbox"], "hint": "how far the four bubbles travel" },
 		{ "name": "uTopCount", "type": "int", "label": "on top", "min": 0, "max": 3, "step": 1, "def": 3, "scenes": ["cage"], "hint": "balls bouncing on the top face of the cage" },
 		{ "name": "uCageSize", "type": "float", "label": "cage", "min": 2.0, "max": 4.5, "step": 0.1, "def": 2.2, "scenes": ["cage"], "hint": "cube half-size" },
@@ -95,7 +96,10 @@ vec3 mapNormal (vec3 p) {
 vec2 march (vec3 ro, vec3 rd, float side) {
 	float t = 0.02;
 	float m = 0.0;
-	for (int i = 0; i < MAXSTEPS; i++) {
+	// uSteps is a uniform: ANGLE's HLSL translator unrolls constant-bound
+	// loops, and a 48-step unroll of the 4-sphere SDF would be a multi-second
+	// link; a uniform-driven bound keeps it a real loop (see COMPILE_DEBUG.md)
+	for (int i = 0; i < uSteps; i++) {
 		vec2 h = map (ro + rd * t);
 		m = h.y;
 		float d = side * h.x;

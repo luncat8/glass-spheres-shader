@@ -19,6 +19,10 @@ window.SHADER_ld3SDl = {
   "group": "orig",
   "url": "https://www.shadertoy.com/view/ld3SDl",
   "channels": {"0":"env_cube","1":"thickness","2":"noise","3":"noise"},
+  "params": [
+    { "name": "uIterations", "type": "int", "def": 20, "hidden": true, "hint": "raymarch step budget (uniform loop bound, keeps the driver from unrolling)" },
+    { "name": "uAASamples", "type": "int", "def": 1, "hidden": true, "hint": "anti-alias sample count (uniform loop bound, keeps the driver from unrolling)" }
+  ],
   "source":
 `/*
 	Fast Thin-Film Interference
@@ -34,8 +38,7 @@ window.SHADER_ld3SDl = {
 
 
 #define INTERSECTION_PRECISION 0.01  // raymarcher intersection precision
-#define ITERATIONS 20				 // max number of iterations
-#define AA_SAMPLES 1				 // anti aliasing samples
+#define ITERATIONS 20				 // compile-time cap for the uniform uIterations bound
 #define BOUND 6.0					 // cube bounds check
 #define DIST_SCALE 0.9   			 // scaling factor for raymarching position update
 
@@ -235,7 +238,6 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     mat3 camMat = calcLookAtMatrix( ro, ta, 0.0 );
     
     float dh = (0.666 / iResolution.y);
-    const float rads = TWO_PI / float(AA_SAMPLES);
     
     vec3 col = vec3(0.0);
     
@@ -246,12 +248,18 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     
     vec3 rds[WAVELENGTHS];
     
-    for (int samp = 0; samp < AA_SAMPLES; samp++) {
+    // uIterations/uAASamples are uniforms: ANGLE's HLSL translator unrolls
+    // constant-bound loops, and a 20-step unroll of the warped sphere SDF
+    // would be a multi-second link; uniform-driven bounds keep them real loops.
+    int maxIter = min(uIterations, ITERATIONS);
+    int aa = max(uAASamples, 1);
+    float rads = TWO_PI / float(aa);
+    for (int samp = 0; samp < aa; samp++) {
         vec2 dxy = dh * vec2(cos(float(samp) * rads), sin(float(samp) * rads));
         vec3 rd = normalize(camMat * vec3(p.xy + dxy, 1.5)); // 1.5 is the lens length
 		vec3 pos = ro;
         bool hit = false;
-        for (int j = 0; j < ITERATIONS; j++) {
+        for (int j = 0; j < maxIter; j++) {
             float t = DIST_SCALE * sdf(pos);
             pos += t * rd;
             hit = t < INTERSECTION_PRECISION;
@@ -293,7 +301,7 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
 
     }
     
-    col /= float(AA_SAMPLES);
+    col /= float(aa);
 	   
     fragColor = vec4( contrast(col), 1.0 );
 }`,

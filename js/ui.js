@@ -50,6 +50,14 @@
 		noteEl.style.display = msg ? 'inline' : 'none';
 	}
 
+	// 'rendering (123ms compile)' once a variant has been compiled — the
+	// status line doubles as the on-screen compile timing readout
+	function readyStatus() {
+		const log = runner && runner.compileLog;
+		const last = log && log.length ? log[log.length - 1] : null;
+		return last && last.ok ? 'rendering (' + last.ms + 'ms compile)' : 'rendering';
+	}
+
 	// ------------------------------------------------- selector button state
 
 	// what picking shader `m` would force on the other selectors
@@ -403,7 +411,7 @@
 		statusEl.textContent = 'compiling…';
 		const done = function (err) {
 			if (err) { setErr(String(err.message || err)); statusEl.textContent = 'error'; return; }
-			statusEl.textContent = 'rendering';
+			statusEl.textContent = readyStatus();
 		};
 		try {
 			runner.select(id, done);
@@ -471,6 +479,7 @@
 			buildParams(meta);
 			refreshSelectors();
 			setNote('');
+			statusEl.textContent = readyStatus();
 		};
 		try {
 			runner.setVariant(done);
