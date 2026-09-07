@@ -119,6 +119,7 @@ function runAll(){
   log('GL renderer: '+gl.getParameter(gl.RENDERER));
   log('GL version: '+gl.getParameter(gl.VERSION));
   log('GLSL version: '+gl.getParameter(gl.SHADING_LANGUAGE_VERSION));
+  log('KHR_parallel_shader_compile: ' + (gl.getExtension('KHR_parallel_shader_compile') ? 'available (the app compiles variants in the background)' : 'unavailable (variant switches block)'));
   log('');
   let results=[];
   for(let i=0;i<list.length;i++){

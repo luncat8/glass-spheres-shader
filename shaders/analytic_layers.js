@@ -77,90 +77,110 @@ vec3 filmTint (float phase) {
 	return 0.52 + 0.48 * cos (2.0 * PI * (phase * vec3 (1.0, 0.81, 0.64) + vec3 (0.02, 0.31, 0.58)));
 }
 
-// one object layer: entry/exit depths, outward normals there, the object and
-// its id; kind 0 = glass object, 1 = opaque top ball of the cage
-struct Hit {
-	float t;
-	float tx;
-	vec3 n;
-	vec3 nx;
-	vec4 sphere;
-	float id;
-	float kind;
-};
+// One object layer: entry/exit depths, outward normals there, the object and
+// its id; kind 0 = glass object, 1 = opaque top ball of the cage.
+// Flattened to scalars/vectors on purpose: the same data as a 7-field struct
+// returned by value and shuffled through inout parameters linked in tens of
+// seconds on some integrated-GPU drivers. Plain out/inout scalars and vectors
+// keep the translator off its struct-copy slow path.
+void setHit (out float t, out float tx, out vec3 n, out vec3 nx, out vec4 sph, out float id, out float kind,
+             float t_, float tx_, vec3 n_, vec3 nx_, vec4 sph_, float id_, float kind_) {
+	t = t_;
+	tx = tx_;
+	n = n_;
+	nx = nx_;
+	sph = sph_;
+	id = id_;
+	kind = kind_;
+}
 
-Hit noHit () {
-	Hit h;
-	h.t = BIG;
-	h.tx = BIG;
-	h.n = vec3 (0.0, 1.0, 0.0);
-	h.nx = vec3 (0.0, 1.0, 0.0);
-	h.sphere = vec4 (0.0);
-	h.id = -1.0;
-	h.kind = -1.0;
-	return h;
+void noHit (out float t, out float tx, out vec3 n, out vec3 nx, out vec4 sph, out float id, out float kind) {
+	t = BIG;
+	tx = BIG;
+	n = vec3 (0.0, 1.0, 0.0);
+	nx = vec3 (0.0, 1.0, 0.0);
+	sph = vec4 (0.0);
+	id = -1.0;
+	kind = -1.0;
 }
 
 // Keep only the nearest three layers. Three transparent shells are enough to
 // preserve overlap depth without multiplying work by layer count.
-void addHit (Hit h, inout Hit h0, inout Hit h1, inout Hit h2) {
-	float t = h.t;
-	if (t < h0.t) {
-		h2 = h1;
-		h1 = h0;
-		h0 = h;
+void addHit (float t, float tx, vec3 n, vec3 nx, vec4 sph, float id, float kind,
+             inout float t0, inout float tx0, inout vec3 n0, inout vec3 nx0, inout vec4 sph0, inout float id0, inout float kind0,
+             inout float t1, inout float tx1, inout vec3 n1, inout vec3 nx1, inout vec4 sph1, inout float id1, inout float kind1,
+             inout float t2, inout float tx2, inout vec3 n2, inout vec3 nx2, inout vec4 sph2, inout float id2, inout float kind2) {
+	if (t < t0) {
+		setHit (t2, tx2, n2, nx2, sph2, id2, kind2, t1, tx1, n1, nx1, sph1, id1, kind1);
+		setHit (t1, tx1, n1, nx1, sph1, id1, kind1, t0, tx0, n0, nx0, sph0, id0, kind0);
+		setHit (t0, tx0, n0, nx0, sph0, id0, kind0, t, tx, n, nx, sph, id, kind);
 		return;
 	}
-	if (t < h1.t) {
-		h2 = h1;
-		h1 = h;
+	if (t < t1) {
+		setHit (t2, tx2, n2, nx2, sph2, id2, kind2, t1, tx1, n1, nx1, sph1, id1, kind1);
+		setHit (t1, tx1, n1, nx1, sph1, id1, kind1, t, tx, n, nx, sph, id, kind);
 		return;
 	}
-	if (t < h2.t) h2 = h;
+	if (t < t2) setHit (t2, tx2, n2, nx2, sph2, id2, kind2, t, tx, n, nx, sph, id, kind);
 }
 
 // the object's hit as a layer; a ray starting inside sees the exit surface
-bool objectHit (int shape, vec3 ro, vec3 rd, vec4 obj, vec4 spin, float id, float kind, out Hit h) {
-	h = noHit ();
+bool objectHit (int shape, vec3 ro, vec3 rd, vec4 obj, vec4 spin, float id, float kind,
+                out float t, out float tx, out vec3 n, out vec3 nx, out vec4 sph, out float oid, out float okind) {
+	noHit (t, tx, n, nx, sph, oid, okind);
 	vec3 nA, nB;
-	vec2 t = shapeHit (shape, ro, rd, obj, spin, nA, nB);
-	if (t.y <= EPS || t.y < t.x) return false;
-	bool outside = t.x > EPS;
-	h.t = outside ? t.x : t.y;
-	h.n = outside ? nA : -nB;
-	h.tx = t.y;
-	h.nx = nB;
-	h.sphere = obj;
-	h.id = id;
-	h.kind = kind;
+	vec2 th = shapeHit (shape, ro, rd, obj, spin, nA, nB);
+	if (th.y <= EPS || th.y < th.x) return false;
+	bool outside = th.x > EPS;
+	t = outside ? th.x : th.y;
+	n = outside ? nA : -nB;
+	tx = th.y;
+	nx = nB;
+	sph = obj;
+	oid = id;
+	okind = kind;
 	return true;
 }
 
-void sphereHits (vec3 ro, vec3 rd, out Hit h0, out Hit h1, out Hit h2) {
-	h0 = noHit ();
-	h1 = noHit ();
-	h2 = noHit ();
-	Hit h;
+void sphereHits (vec3 ro, vec3 rd,
+                 out float t0, out float tx0, out vec3 n0, out vec3 nx0, out vec4 sph0, out float id0, out float kind0,
+                 out float t1, out float tx1, out vec3 n1, out vec3 nx1, out vec4 sph1, out float id1, out float kind1,
+                 out float t2, out float tx2, out vec3 n2, out vec3 nx2, out vec4 sph2, out float id2, out float kind2) {
+	noHit (t0, tx0, n0, nx0, sph0, id0, kind0);
+	noHit (t1, tx1, n1, nx1, sph1, id1, kind1);
+	noHit (t2, tx2, n2, nx2, sph2, id2, kind2);
+	float t, tx, id, kind;
+	vec3 n, nx;
+	vec4 sph;
 	for (int i = 0; i < MAX_INSIDE; i++) {
 		if (i >= uCount) break;
-		if (objectHit (uShape, ro, rd, uInside[i], uSpin[i], float (i), 0.0, h)) addHit (h, h0, h1, h2);
+		if (objectHit (uShape, ro, rd, uInside[i], uSpin[i], float (i), 0.0, t, tx, n, nx, sph, id, kind)) {
+			addHit (t, tx, n, nx, sph, id, kind,
+			        t0, tx0, n0, nx0, sph0, id0, kind0,
+			        t1, tx1, n1, nx1, sph1, id1, kind1,
+			        t2, tx2, n2, nx2, sph2, id2, kind2);
+		}
 	}
 	// the balls on top belong to the cage scene only, and stay spheres
 	int topN = (uScene == 3) ? uTopCount : 0;
 	for (int i = 0; i < MAX_TOP; i++) {
 		if (i >= topN) break;
-		if (objectHit (SHAPE_SPHERE, ro, rd, uTop[i], vec4 (0.0), float (i), 1.0, h)) addHit (h, h0, h1, h2);
+		if (objectHit (SHAPE_SPHERE, ro, rd, uTop[i], vec4 (0.0), float (i), 1.0, t, tx, n, nx, sph, id, kind)) {
+			addHit (t, tx, n, nx, sph, id, kind,
+			        t0, tx0, n0, nx0, sph0, id0, kind0,
+			        t1, tx1, n1, nx1, sph1, id1, kind1,
+			        t2, tx2, n2, nx2, sph2, id2, kind2);
+		}
 	}
 }
 
-vec3 shadeGlass (vec3 behind, vec3 ro, vec3 rd, Hit h) {
-	vec3 p = ro + rd * h.t;
-	vec3 n = h.n;
+vec3 shadeGlass (vec3 behind, vec3 ro, vec3 rd, float t, float tx, vec3 n, vec3 nx, vec4 sph, float id) {
+	vec3 p = ro + rd * t;
 	float ndv = saturate1 (dot (-rd, n));
 	float f0 = pow ((uIor - 1.0) / (uIor + 1.0), 2.0);
 	float F = fresnel (ndv, f0);
-	float wallPath = uWall * h.sphere.w / max (ndv, 0.13);
-	vec3 tint = sphereTint (h.id);
+	float wallPath = uWall * sph.w / max (ndv, 0.13);
+	vec3 tint = sphereTint (id);
 	vec3 transmit = behind * exp (-(vec3 (1.08) - tint) * uDensity * wallPath * 8.0);
 
 	vec3 refr = refract (rd, n, 1.0 / max (uIor, 1.001));
@@ -170,8 +190,8 @@ vec3 shadeGlass (vec3 behind, vec3 ro, vec3 rd, Hit h) {
 		transmit = mix (transmit, transmit * env (refr), 0.08 * (1.0 - F));
 	}
 
-	float sw = swirl ((p - h.sphere.xyz) / h.sphere.w * 4.0
-		+ vec3 (0.0, iTime * 0.08, h.id * 1.7));
+	float sw = swirl ((p - sph.xyz) / sph.w * 4.0
+		+ vec3 (0.0, iTime * 0.08, id * 1.7));
 	float optical = wallPath * 12.0 * (1.0 + 0.35 * sw);
 	vec3 film = mix (vec3 (1.0), filmTint (optical), uIrid);
 	vec3 reflected = envSun (reflect (rd, n)) * film;
@@ -182,19 +202,23 @@ vec3 shadeGlass (vec3 behind, vec3 ro, vec3 rd, Hit h) {
 
 	float rim = pow (1.0 - ndv, 2.4);
 	float backRim = 0.0;
-	if (h.tx > h.t + EPS) backRim = pow (1.0 - abs (dot (rd, h.nx)), 4.0);
+	if (tx > t + EPS) backRim = pow (1.0 - abs (dot (rd, nx)), 4.0);
 	col += film * (0.085 + 0.42 * rim + 0.12 * backRim) * tint;
 	return col;
 }
 
-vec3 shadeSphere (vec3 behind, vec3 ro, vec3 rd, Hit h) {
-	if (h.kind > 0.5) return cageShadeTop (behind, ro, rd, h.sphere, h.t, h.id);
-	return shadeGlass (behind, ro, rd, h);
+vec3 shadeSphere (vec3 behind, vec3 ro, vec3 rd, float t, float tx, vec3 n, vec3 nx, vec4 sph, float id, float kind) {
+	if (kind > 0.5) return cageShadeTop (behind, ro, rd, sph, t, id);
+	return shadeGlass (behind, ro, rd, t, tx, n, nx, sph, id);
 }
 
 vec3 trace (vec3 ro, vec3 rd) {
-	Hit h0, h1, h2;
-	sphereHits (ro, rd, h0, h1, h2);
+	float t0, tx0, id0, kind0, t1, tx1, id1, kind1, t2, tx2, id2, kind2;
+	vec3 n0, nx0, n1, nx1, n2, nx2;
+	vec4 sph0, sph1, sph2;
+	sphereHits (ro, rd, t0, tx0, n0, nx0, sph0, id0, kind0,
+	            t1, tx1, n1, nx1, sph1, id1, kind1,
+	            t2, tx2, n2, nx2, sph2, id2, kind2);
 	float wireT = BIG, wireMask = 0.0;
 	// the wire cube is world-space geometry, so it only exists in the cage scene
 	if (uScene == 3) cageWireHit (ro, rd, wireT, wireMask);
@@ -210,23 +234,23 @@ vec3 trace (vec3 ro, vec3 rd) {
 		if (lid < 0) landT = BIG;
 		else col = landShade (ro, rd, landT, ln, lid);
 	}
-	if (landT < h2.t) h2 = noHit ();
-	if (landT < h1.t) h1 = noHit ();
-	if (landT < h0.t) h0 = noHit ();
+	if (landT < t2) noHit (t2, tx2, n2, nx2, sph2, id2, kind2);
+	if (landT < t1) noHit (t1, tx1, n1, nx1, sph1, id1, kind1);
+	if (landT < t0) noHit (t0, tx0, n0, nx0, sph0, id0, kind0);
 	bool wireDone = wireMask <= 0.0;
 	// Compose from far to near. The wire is inserted at its measured ray depth
 	// instead of being an always-on-top screen overlay.
-	if (h2.kind >= 0.0) {
-		if (!wireDone && wireT > h2.t) { col = cageDrawWire (col, wireMask); wireDone = true; }
-		col = shadeSphere (col, ro, rd, h2);
+	if (kind2 >= 0.0) {
+		if (!wireDone && wireT > t2) { col = cageDrawWire (col, wireMask); wireDone = true; }
+		col = shadeSphere (col, ro, rd, t2, tx2, n2, nx2, sph2, id2, kind2);
 	}
-	if (h1.kind >= 0.0) {
-		if (!wireDone && wireT > h1.t) { col = cageDrawWire (col, wireMask); wireDone = true; }
-		col = shadeSphere (col, ro, rd, h1);
+	if (kind1 >= 0.0) {
+		if (!wireDone && wireT > t1) { col = cageDrawWire (col, wireMask); wireDone = true; }
+		col = shadeSphere (col, ro, rd, t1, tx1, n1, nx1, sph1, id1, kind1);
 	}
-	if (h0.kind >= 0.0) {
-		if (!wireDone && wireT > h0.t) { col = cageDrawWire (col, wireMask); wireDone = true; }
-		col = shadeSphere (col, ro, rd, h0);
+	if (kind0 >= 0.0) {
+		if (!wireDone && wireT > t0) { col = cageDrawWire (col, wireMask); wireDone = true; }
+		col = shadeSphere (col, ro, rd, t0, tx0, n0, nx0, sph0, id0, kind0);
 	}
 	if (!wireDone) col = cageDrawWire (col, wireMask);
 	return col;

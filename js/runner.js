@@ -129,7 +129,13 @@ void main() {
 		uniformLocs: null,
 		current: null, // { id, title, ... }
 		variantKey: '',
+		wantedKey: '',       // the variant the user most recently asked for
 		variants: Object.create(null), // compiled base/terrain/shape variants for current shader
+		parallel: false,      // KHR_parallel_shader_compile available (async compile/link)
+		jobs: [],             // in-flight compile jobs
+		pendingSelect: null,  // select() waiting for its variant to link
+		primeQueue: [],       // variants to compile in the background, one at a time
+		primeActive: null,    // the background (prime) job currently compiling
 		running: false,
 		startTime: 0,
 		lastTime: 0,
@@ -263,42 +269,175 @@ void main() {
 		return tex;
 	}
 
-	function compile(gl, type, src) {
-		const label = type === gl.VERTEX_SHADER ? 'VS' : 'FS';
-		const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
-		const sh = gl.createShader(type);
-		gl.shaderSource(sh, src);
-		gl.compileShader(sh);
-		const ok = gl.getShaderParameter(sh, gl.COMPILE_STATUS);
-		const dt = (typeof performance !== 'undefined' && performance.now) ? (performance.now() - t0) : 0;
-		if (dt > 100) {
-			try { console.log('[Runner] '+label+' compile/status took '+dt.toFixed(1)+'ms len='+src.length+' lines='+src.split('\n').length); } catch(e){}
-		}
-		if (!ok) {
-			const log = gl.getShaderInfoLog(sh);
-			gl.deleteShader(sh);
-			throw new Error('shader compile failed ('+label+' '+dt.toFixed(1)+'ms):\n' + log + '\n--- source ---\n' + src.slice(0, 4000));
-		}
-		return sh;
+	// ---- variant compilation ------------------------------------------------
+	//
+	// A variant is one (shader × scene-terrain × shape) combination. On many
+	// drivers compiling a variant blocks the page: the link alone was measured
+	// at seconds-to-tens-of-seconds on integrated GPUs, even for the default
+	// sphere/sky program. Where KHR_parallel_shader_compile is available the
+	// driver compiles and links on its own threads, a job below is polled until
+	// ready while the previous program keeps rendering, and the swap happens
+	// only after the new program has actually linked. Without the extension a
+	// job is finished synchronously inside makeJob, preserving the old blocking
+	// behaviour rather than regressing it.
+
+	const SHAPE_VALUES = { sphere: 0, cube: 1, tetra: 2, knot: 3 };
+
+	function shapeValue(id) {
+		const v = SHAPE_VALUES[id];
+		return v === undefined ? 0 : v;
 	}
 
-	function link(gl, vs, fs) {
-		const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
-		const prog = gl.createProgram();
-		gl.attachShader(prog, vs);
-		gl.attachShader(prog, fs);
-		gl.linkProgram(prog);
-		const ok = gl.getProgramParameter(prog, gl.LINK_STATUS);
-		const dt = (typeof performance !== 'undefined' && performance.now) ? (performance.now() - t0) : 0;
-		if (dt > 100) {
-			try { console.log('[Runner] program link/status took '+dt.toFixed(1)+'ms'); } catch(e){}
+	function makeJob(meta, variant, store, active, onDone) {
+		const gl = Runner.gl;
+		const src = variantSource(meta, variant);
+		const job = {
+			meta: meta,
+			variant: variant,
+			key: variant.key,
+			store: store,
+			active: active,
+			onDone: onDone,
+			flags: resolveChannelKinds(meta.source, meta.channels),
+			vs: null, fs: null, prog: null,
+			phase: 'compile',
+			ok: true, err: null, stale: false,
+			srcLen: src.length,
+			t0: (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0,
+		};
+		Runner.jobs.push(job);
+		job.vs = gl.createShader(gl.VERTEX_SHADER);
+		gl.shaderSource(job.vs, VS);
+		gl.compileShader(job.vs);
+		job.fs = gl.createShader(gl.FRAGMENT_SHADER);
+		gl.shaderSource(job.fs, src);
+		gl.compileShader(job.fs);
+		if (Runner.parallel) ensurePoll();
+		else {
+			// finish on the next tick so the caller can store the returned job
+			// before onDone fires (onDone may reference the job object)
+			setTimeout(function () { finishJobSync(job); }, 0);
 		}
-		if (!ok) {
-			const log = gl.getProgramInfoLog(prog);
-			gl.deleteProgram(prog);
-			throw new Error('program link failed ('+dt.toFixed(1)+'ms):\n' + log);
+		return job;
+	}
+
+	function finishJobSync(job) {
+		if (job.phase === 'done') return; // may be called again by a deferred tick
+		const gl = Runner.gl;
+		if (!gl) { job.stale = true; finishJob(job); return; }
+		if (gl.getShaderParameter(job.vs, gl.COMPILE_STATUS)) {
+			if (gl.getShaderParameter(job.fs, gl.COMPILE_STATUS)) {
+				job.prog = gl.createProgram();
+				gl.attachShader(job.prog, job.vs);
+				gl.attachShader(job.prog, job.fs);
+				gl.linkProgram(job.prog);
+				if (!gl.getProgramParameter(job.prog, gl.LINK_STATUS)) {
+					job.err = 'program link failed:\n' + gl.getProgramInfoLog(job.prog);
+					job.ok = false;
+				}
+			} else {
+				job.err = 'fragment shader compile failed:\n' + gl.getShaderInfoLog(job.fs);
+				job.ok = false;
+			}
+		} else {
+			job.err = 'vertex shader compile failed:\n' + gl.getShaderInfoLog(job.vs);
+			job.ok = false;
 		}
-		return prog;
+		removeJob(job);
+		finishJob(job);
+	}
+
+	// advance a parallel job one stage; returns true when it is done
+	function advanceJob(job) {
+		const gl = Runner.gl;
+		if (!gl) { job.stale = true; finishJob(job); return true; }
+		if (job.phase === 'compile') {
+			if (!gl.getShaderParameter(job.vs, gl.COMPLETION_STATUS_KHR)) return false;
+			if (!gl.getShaderParameter(job.fs, gl.COMPLETION_STATUS_KHR)) return false;
+			if (!gl.getShaderParameter(job.vs, gl.COMPILE_STATUS)) {
+				job.err = 'vertex shader compile failed:\n' + gl.getShaderInfoLog(job.vs);
+				job.ok = false;
+			} else if (!gl.getShaderParameter(job.fs, gl.COMPILE_STATUS)) {
+				job.err = 'fragment shader compile failed:\n' + gl.getShaderInfoLog(job.fs);
+				job.ok = false;
+			} else {
+				job.prog = gl.createProgram();
+				gl.attachShader(job.prog, job.vs);
+				gl.attachShader(job.prog, job.fs);
+				gl.linkProgram(job.prog);
+				job.phase = 'link';
+				return false;
+			}
+		} else if (job.phase === 'link') {
+			if (!gl.getProgramParameter(job.prog, gl.COMPLETION_STATUS_KHR)) return false;
+			if (!gl.getProgramParameter(job.prog, gl.LINK_STATUS)) {
+				job.err = 'program link failed:\n' + gl.getProgramInfoLog(job.prog);
+				job.ok = false;
+			}
+		} else {
+			return true;
+		}
+		finishJob(job);
+		return true;
+	}
+
+	function finishJob(job) {
+		const gl = Runner.gl;
+		job.phase = 'done';
+		if (job.vs) { gl.deleteShader(job.vs); job.vs = null; }
+		if (job.fs) { gl.deleteShader(job.fs); job.fs = null; }
+		const dt = (typeof performance !== 'undefined' && performance.now) ? (performance.now() - job.t0) : 0;
+		if (dt > 1000) {
+			try { console.log('[Runner] ' + job.meta.id + ' variant ' + job.key + ' ' + (job.active ? 'active' : 'background') + ' ready in ' + dt.toFixed(0) + 'ms' + (job.ok ? '' : ' FAILED')); } catch (e) {}
+		}
+		if (job.ok && !job.stale) {
+			const item = {
+				program: job.prog,
+				locs: getUniformLocs(gl, job.prog, job.meta),
+				srcLen: job.srcLen,
+				flags: job.flags,
+			};
+			if (job.onDone) job.onDone(null, item);
+		} else {
+			if (job.prog) { gl.deleteProgram(job.prog); job.prog = null; }
+			if (job.onDone) job.onDone(new Error(job.err || 'variant compile was abandoned'), null);
+		}
+	}
+
+	function removeJob(job) {
+		const jobs = Runner.jobs;
+		for (let i = 0; i < jobs.length; i++) if (jobs[i] === job) { jobs.splice(i, 1); return; }
+	}
+
+	function jobFor(meta, key) {
+		const jobs = Runner.jobs;
+		for (let i = 0; i < jobs.length; i++) {
+			const j = jobs[i];
+			if (j.meta === meta && j.key === key && !j.stale) return j;
+		}
+		return null;
+	}
+
+	function stepJobs() {
+		const gl = Runner.gl;
+		if (!gl) return false;
+		const jobs = Runner.jobs;
+		for (let i = jobs.length - 1; i >= 0; i--) {
+			if (advanceJob(jobs[i])) jobs.splice(i, 1);
+		}
+		return jobs.length > 0;
+	}
+
+	let pollScheduled = false;
+	function ensurePoll() {
+		if (pollScheduled) return;
+		pollScheduled = true;
+		const tick = function () {
+			pollScheduled = false;
+			if (stepJobs()) ensurePoll();
+		};
+		if (typeof requestAnimationFrame === 'function') requestAnimationFrame(tick);
+		else setTimeout(tick, 16);
 	}
 
 	function getUniformLocs(gl, prog, meta) {
@@ -404,6 +543,9 @@ void main() {
 		const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
 		if (!gl) throw new Error('WebGL2 not supported');
 		Runner.gl = gl;
+		// Where supported, compile+link run on driver threads and are polled
+		// here instead of blocking the page (see makeJob below).
+		Runner.parallel = !!(gl.getExtension && gl.getExtension('KHR_parallel_shader_compile'));
 
 		// pre-allocated VAO (fullscreen tri via gl_VertexID)
 		const vao = gl.createVertexArray();
@@ -490,86 +632,180 @@ void main() {
 		}
 	}
 
-	function compileProgram(meta, variant) {
-		const gl = Runner.gl;
-		const src = variantSource(meta, variant);
-		let vs = null, fs = null, program = null;
-		try {
-			vs = compile(gl, gl.VERTEX_SHADER, VS);
-			fs = compile(gl, gl.FRAGMENT_SHADER, src);
-			program = link(gl, vs, fs);
-			return { program: program, locs: getUniformLocs(gl, program, meta), srcLen: src.length };
-		} catch (e) {
-			if (program) gl.deleteProgram(program);
-			throw e;
-		} finally {
-			if (vs) gl.deleteShader(vs);
-			if (fs) gl.deleteShader(fs);
-		}
-	}
-
 	function activateVariant(meta, key, item) {
 		Runner.program = item.program;
 		Runner.uniformLocs = item.locs;
 		Runner.variantKey = key;
+		for (let i = 0; i < 4; i++) Runner.channelIsCube[i] = item.flags[i];
 	}
 
-	function select(id) {
-		const tSel0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
-		const list = window.SHADERS || [];
-		let meta = null;
-		for (let i = 0; i < list.length; i++) if (list[i].id === id) { meta = list[i]; break; }
-		if (!meta) throw new Error('unknown shader id: ' + id);
-		const variant = variantOf(meta);
-		const flags = resolveChannelKinds(meta.source, meta.channels);
-		const oldFlags = Runner.channelIsCube.slice();
-		for (let i = 0; i < 4; i++) Runner.channelIsCube[i] = flags[i];
-		// Do not delete the old program until the new one has linked. A failed
-		// compile must leave the last working shader usable instead of poisoning
-		// every following selection on browsers that reset a WebGL compiler.
-		const oldVariants = Runner.variants;
-		const nextVariants = Object.create(null);
-		let item;
-		try {
-			item = compileProgram(meta, variant);
-		} catch (e) {
-			Runner.variants = oldVariants;
-			for (let i = 0; i < 4; i++) Runner.channelIsCube[i] = oldFlags[i];
-			throw e;
-		}
-		disposeVariants(oldVariants);
-		Runner.variants = nextVariants;
-		Runner.variants[variant.key] = item;
-		activateVariant(meta, variant.key, item);
+	// runs when the active program becomes ready: reset the per-shader clock and
+	// pre-allocate the CPU-side buffers the frame loop will feed
+	function commitSelect(meta) {
 		prepareParams(meta);
 		prepareArrays(meta);
 		prepareVars(meta);
-		Runner.current = meta;
 		Runner.startTime = performance.now();
 		Runner.lastTime = Runner.startTime;
 		Runner.frame = 0;
 		Runner.fpsSamples.length = 0;
 		Runner.sceneTime = 0;
-		const tSel1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
-		const dt = tSel1 - tSel0;
-		if (dt > 100) {
-			try { console.log('[Runner] select('+id+') total ' + dt.toFixed(1) + 'ms srcLen=' + item.srcLen + ' variant=' + variant.key); } catch(e){}
+	}
+
+	// Compile the variants this shader will probably be switched to next, one at
+	// a time in the background, so a later scene/shape click finds a linked
+	// program waiting. The glass-land (terrain) variant of the current shape is
+	// primed first because it is the most expensive switch.
+	function primeVariants(meta) {
+		const scenes = meta.scenes || [];
+		const shapes = meta.shapes || ['sphere'];
+		const hasTerrain = scenes.indexOf('terrain') >= 0;
+		const cur = variantOf(meta);
+		const queue = [];
+		const push = function (terrain, shape) {
+			const key = terrain + ':' + shape;
+			if (key === Runner.variantKey) return;
+			if (Runner.variants[key] || jobFor(meta, key)) return;
+			queue.push({ terrain: terrain, shape: shape, key: key });
+		};
+		if (hasTerrain && !cur.terrain) push(1, cur.shape);
+		for (let i = 0; i < shapes.length; i++) push(cur.terrain, shapeValue(shapes[i]));
+		if (hasTerrain) for (let i = 0; i < shapes.length; i++) push(1, shapeValue(shapes[i]));
+		Runner.primeQueue = queue;
+		Runner.primeActive = null;
+		pumpPrimeQueue();
+	}
+
+	function pumpPrimeQueue() {
+		if (Runner.primeActive) return;
+		const meta = Runner.current;
+		if (!meta) return;
+		while (Runner.primeQueue.length) {
+			const v = Runner.primeQueue.shift();
+			if (Runner.variants[v.key] || jobFor(meta, v.key)) continue;
+			const store = Runner.variants;
+			const job = makeJob(meta, v, store, false, function (err, item) {
+				if (Runner.primeActive === job) Runner.primeActive = null;
+				if (!err && item) {
+					if (job.store === Runner.variants) job.store[job.key] = item;
+					else Runner.gl.deleteProgram(item.program); // shader switched mid-prime
+				}
+				pumpPrimeQueue();
+			});
+			Runner.primeActive = job;
+			return;
 		}
+	}
+
+	function select(id, onReady) {
+		const list = window.SHADERS || [];
+		let meta = null;
+		for (let i = 0; i < list.length; i++) if (list[i].id === id) { meta = list[i]; break; }
+		if (!meta) throw new Error('unknown shader id: ' + id);
+		const variant = variantOf(meta);
+		const key = variant.key;
+
+		Runner.wantedKey = key;
+
+		// a previous select may still be compiling; abandon it. The old program
+		// keeps rendering until the new one has actually linked.
+		if (Runner.pendingSelect) {
+			Runner.pendingSelect.abandoned = true;
+			const aj = Runner.pendingSelect.activeJob;
+			if (aj) aj.stale = true;
+		}
+
+		// re-selecting the active shader: the program is already linked
+		if (Runner.current === meta && Runner.variants[key]) {
+			activateVariant(meta, key, Runner.variants[key]);
+			commitSelect(meta);
+			if (onReady) onReady(null, meta);
+			return meta;
+		}
+
+		const store = Object.create(null);
+		const pending = { meta: meta, store: store, key: key, onReady: onReady, abandoned: false, activeJob: null };
+		Runner.pendingSelect = pending;
+
+		const job = makeJob(meta, variant, store, true, function (err, item) {
+			pending.activeJob = null;
+			if (pending.abandoned || job.stale) {
+				if (item && item.program) Runner.gl.deleteProgram(item.program);
+				return;
+			}
+			if (err) {
+				Runner.pendingSelect = null;
+				disposeVariants(store);
+				if (onReady) onReady(err, null);
+				return;
+			}
+			store[key] = item;
+			disposeVariants(Runner.variants);
+			Runner.variants = store;
+			Runner.current = meta;
+			Runner.pendingSelect = null;
+			activateVariant(meta, key, item);
+			commitSelect(meta);
+			if (onReady) onReady(null, meta);
+			primeVariants(meta);
+		});
+		pending.activeJob = job;
+		// Nothing is rendering yet (boot): build the first program right here so
+		// the axes, camera and picker see a fully loaded shader the moment this
+		// returns, exactly as before the async change.
+		if (!Runner.current) finishJobSync(job);
 		return meta;
 	}
 
-	// Called after the scene or shape toolbar changes. User-selected variants
-	// compile on demand; switching back reuses the already linked program.
-	function setVariant() {
-		if (!Runner.current) return;
-		const variant = variantOf(Runner.current);
-		if (variant.key === Runner.variantKey) return;
-		let item = Runner.variants[variant.key];
-		if (!item) {
-			item = compileProgram(Runner.current, variant);
-			Runner.variants[variant.key] = item;
+	// Called after the scene or shape toolbar changes. A linked variant is
+	// activated immediately; otherwise its compile job is created (or an
+	// in-flight background prime is promoted to it) and the swap happens when
+	// the program is ready, leaving the old program rendering meanwhile.
+	function setVariant(onReady) {
+		const meta = Runner.current;
+		if (!meta) return;
+		const variant = variantOf(meta);
+		const key = variant.key;
+		if (key === Runner.variantKey) { if (onReady) onReady(null, meta); return; }
+		Runner.wantedKey = key;
+		const item = Runner.variants[key];
+		if (item) {
+			activateVariant(meta, key, item);
+			if (onReady) onReady(null, meta);
+			return;
 		}
-		activateVariant(Runner.current, variant.key, item);
+		const existing = jobFor(meta, key);
+		if (existing) {
+			existing.active = true;
+			existing.onDone = function (err, it) {
+				if (Runner.primeActive === existing) Runner.primeActive = null;
+				pumpPrimeQueue();
+				if (err || existing.stale) {
+					if (it && it.program) Runner.gl.deleteProgram(it.program);
+					if (onReady) onReady(err, null);
+					return;
+				}
+				if (existing.meta !== Runner.current) { Runner.gl.deleteProgram(it.program); return; }
+				Runner.variants[key] = it;
+				// a newer shape/scene click superseded this one: keep it cached
+				// but do not activate it over the newer choice
+				if (key !== Runner.wantedKey) return;
+				activateVariant(meta, key, it);
+				if (onReady) onReady(null, meta);
+			};
+			return;
+		}
+		makeJob(meta, variant, Runner.variants, true, function (err, it) {
+			if (err) {
+				if (onReady) onReady(err, null);
+				return;
+			}
+			if (meta !== Runner.current) { Runner.gl.deleteProgram(it.program); return; }
+			Runner.variants[key] = it;
+			if (key !== Runner.wantedKey) return;
+			activateVariant(meta, key, it);
+			if (onReady) onReady(null, meta);
+		});
 	}
 
 	function bindChannel(gl, prog, locs, idx) {
@@ -624,6 +860,9 @@ void main() {
 	function frame() {
 		if (!Runner.running) return;
 		const gl = Runner.gl;
+		// the first program may still be compiling (async): render nothing until
+		// it is ready, but keep the loop alive so it resumes the moment it links
+		if (!Runner.program) { requestAnimationFrame(frame); return; }
 		const t = performance.now();
 		const dt = (t - Runner.lastTime) / 1000;
 		Runner.lastTime = t;
@@ -676,7 +915,6 @@ void main() {
 	}
 
 	function run() {
-		if (!Runner.program) throw new Error('no shader selected');
 		Runner.running = true;
 		Runner.startTime = performance.now();
 		Runner.lastTime = Runner.startTime;

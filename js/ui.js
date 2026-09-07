@@ -398,8 +398,15 @@
 				' — ' + ax.noun + ' switched to "' + ax.reg.get(ax.cur).label + '"';
 		}
 		for (let a = 0; a < AXIS_LIST.length; a++) AXIS_LIST[a].reg.apply(meta, AXIS_LIST[a].cur);
+		// the selected program may compile in the background (async); the DOM
+		// below does not depend on it, only the status word waits for the swap
+		statusEl.textContent = 'compiling…';
+		const done = function (err) {
+			if (err) { setErr(String(err.message || err)); statusEl.textContent = 'error'; return; }
+			statusEl.textContent = 'rendering';
+		};
 		try {
-			runner.select(id);
+			runner.select(id, done);
 			if (window.Cam) window.Cam.attach(meta);
 			metaEl.textContent = meta.title || meta.id;
 			if (meta.url) {
@@ -419,7 +426,6 @@
 			refreshSelectors();
 			setNote(msg);
 			setErr('');
-			statusEl.textContent = 'rendering';
 		} catch (e) {
 			setErr(String(e.message || e));
 			statusEl.textContent = 'error';
@@ -447,19 +453,35 @@
 		const previous = ax.cur;
 		setCur(ax, id, meta);
 		ax.reg.apply(meta, id);
+		const done = function (err) {
+			if (err) {
+				// Keep the last linked program active if an optional variant is
+				// not supported by this driver. The failed program is cleaned up
+				// by Runner. Only roll back if this click is still the current
+				// choice (a faster second click may have superseded it).
+				if (ax.cur === id) {
+					ax.reg.apply(meta, previous);
+					setCur(ax, previous, meta);
+					setErr(String(err.message || err));
+					buildParams(meta);
+					refreshSelectors();
+				}
+				return;
+			}
+			buildParams(meta);
+			refreshSelectors();
+			setNote('');
+		};
 		try {
-			runner.setVariant();
+			runner.setVariant(done);
 		} catch (err) {
-			// Keep the last linked program active if an optional variant is not
-			// supported by this driver. The failed program is cleaned up by Runner.
 			ax.reg.apply(meta, previous);
 			setCur(ax, previous, meta);
 			setErr(String(err.message || err));
+			buildParams(meta);
+			refreshSelectors();
 			return;
 		}
-		buildParams(meta);
-		refreshSelectors();
-		setNote('');
 	}
 
 	function pickScene(sceneId) { pickEntry(AXES.scene, sceneId); }
