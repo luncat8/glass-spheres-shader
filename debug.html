@@ -16,6 +16,7 @@ button:hover{background:#3a3a3a}
 <button id="runAll">compile all shaders (timed)</button>
 <button id="runSeq">compile first 5 in sequence (simulates startup)</button>
 <button id="runVariants">compile every scene/shape variant of the first shader</button>
+<label title="changes the GLSL source so the driver's source/binary cache cannot reuse this page's previous run"><input id="cacheBust" type="checkbox" checked> unique source (cold-cache probe)</label>
 <button id="clear">clear</button>
 <span id="status">idle</span>
 </div>
@@ -47,13 +48,17 @@ function log(s){ logEl.textContent += s + '\n'; console.log(s); }
 function clearLog(){ logEl.textContent=''; }
 
 const SHAPE = { sphere:0, cube:1, tetra:2, knot:3 };
+let sourceNonce = 0;
 
-// Build the exact source the runner sends to the driver for one variant.
+// Build the exact source the runner sends to the driver for one variant. The
+// optional nonce creates a genuinely new source key for repeatable cold-cache
+// diagnosis; it is a preprocessor definition and cannot affect rendering.
 function buildSource(meta, terrain, shape){
   const helpers = window.Runner.helpers;
   const flags = helpers.resolveChannelKinds(meta.source, meta.channels);
   const header = helpers.buildFSHeader(meta.source, flags) + helpers.buildUniformDecls(meta);
   return header + '#define USE_TERRAIN ' + terrain + '\n#define SHAPE_MODE ' + shape + '\n' +
+    (sourceNonce ? '#define COMPILE_DEBUG_NONCE ' + sourceNonce + '\n' : '') +
     meta.source + helpers.FS_FOOTER;
 }
 
@@ -66,7 +71,8 @@ function compileVariant(gl, ext, meta, terrain, shape, cb){
   let vs = null, fs = null, prog = null;
   const st = { id: meta.id, key: terrain + ':' + shape, ok: true, err: '',
     srcLen: src.length, lines: src.split('\n').length,
-    compileCall: 0, linkCall: 0, pollMax: 0, polls: 0, total: 0, async: !!ext };
+    compileCall: 0, linkCall: 0, compileWait: 0, linkWait: 0,
+    pollMax: 0, polls: 0, total: 0, async: !!ext };
   try {
     let t = performance.now();
     vs = gl.createShader(gl.VERTEX_SHADER);
@@ -90,6 +96,7 @@ function compileVariant(gl, ext, meta, terrain, shape, cb){
         const fsDone = gl.getShaderParameter(fs, ext.COMPLETION_STATUS_KHR);
         if (typeof fsDone !== 'boolean') { fail('driver rejected COMPLETION_STATUS_KHR'); return; }
         if (!fsDone) return setTimeout(poll, 16);
+        st.compileWait = performance.now() - t0;
         link();
       })();
     } else {
@@ -102,6 +109,7 @@ function compileVariant(gl, ext, meta, terrain, shape, cb){
     function link(){
       if (st.err || !st.ok) return;
       const t = performance.now();
+      const linkStarted = t;
       prog = gl.createProgram();
       gl.attachShader(prog, vs);
       gl.attachShader(prog, fs);
@@ -116,6 +124,7 @@ function compileVariant(gl, ext, meta, terrain, shape, cb){
           st.polls++;
           if (typeof done !== 'boolean') { fail('link poll rejected COMPLETION_STATUS_KHR'); return; }
           if (!done) return setTimeout(pollLink, 16);
+          st.linkWait = performance.now() - linkStarted;
           if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) fail('LINK: ' + gl.getProgramInfoLog(prog));
           else finish();
         })();
@@ -145,7 +154,8 @@ function fmtRow(r){
     ' total=' + (r.total|0) + 'ms' +
     ' compileCall=' + (r.compileCall|0) + 'ms' +
     ' linkCall=' + (r.linkCall|0) + 'ms' +
-    (r.async ? ' pollMax=' + r.pollMax.toFixed(1) + 'ms polls=' + r.polls : ' [SYNC]') +
+    (r.async ? ' compileWait=' + (r.compileWait|0) + 'ms linkWait=' + (r.linkWait|0) +
+      'ms pollMax=' + r.pollMax.toFixed(1) + 'ms polls=' + r.polls : ' [SYNC]') +
     ' ok=' + r.ok +
     (r.err ? '  ERR: ' + r.err.slice(0,300) : '');
 }
@@ -168,6 +178,7 @@ function ctxInfo(gl){
 
 function runList(list, label, cb){
   clearLog();
+  sourceNonce = document.getElementById('cacheBust').checked ? ((Date.now() % 1000000000) | 0) : 0;
   const gl = document.getElementById('c').getContext('webgl2');
   if (!gl) { log('WebGL2 not supported'); return; }
   const ext = ctxInfo(gl);
@@ -219,6 +230,7 @@ function runSeq(){
 // priming produces at boot and what a shape/terrain click has to compile
 function runVariants(){
   clearLog();
+  sourceNonce = document.getElementById('cacheBust').checked ? ((Date.now() % 1000000000) | 0) : 0;
   const gl = document.getElementById('c').getContext('webgl2');
   if (!gl) { log('WebGL2 not supported'); return; }
   const ext = ctxInfo(gl);

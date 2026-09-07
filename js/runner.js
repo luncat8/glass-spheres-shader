@@ -138,8 +138,6 @@ void main() {
 		contextLost: false,
 		jobs: [],             // in-flight compile jobs
 		pendingSelect: null,  // select() waiting for its variant to link
-		primeQueue: [],       // variants to compile in the background, one at a time
-		primeActive: null,    // the background (prime) job currently compiling
 		running: false,
 		startTime: 0,
 		lastTime: 0,
@@ -308,6 +306,7 @@ void main() {
 			ok: true, err: null, stale: false,
 			srcLen: src.length,
 			t0: (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0,
+			compileMs: 0, linkMs: 0, linkT0: 0,
 		};
 		Runner.jobs.push(job);
 		job.vs = gl.createShader(gl.VERTEX_SHADER);
@@ -382,6 +381,7 @@ void main() {
 			const fsDone = gl.getShaderParameter(job.fs, status);
 			if (typeof fsDone !== 'boolean') { job.err = 'driver rejected COMPLETION_STATUS_KHR'; job.ok = false; finishJob(job); return true; }
 			if (!fsDone) return false;
+			job.compileMs = performance.now() - job.t0;
 			if (!gl.getShaderParameter(job.vs, gl.COMPILE_STATUS)) {
 				job.err = 'vertex shader compile failed:\n' + gl.getShaderInfoLog(job.vs);
 				job.ok = false;
@@ -392,6 +392,7 @@ void main() {
 				job.prog = gl.createProgram();
 				gl.attachShader(job.prog, job.vs);
 				gl.attachShader(job.prog, job.fs);
+				job.linkT0 = performance.now();
 				gl.linkProgram(job.prog);
 				job.phase = 'link';
 				return false;
@@ -400,6 +401,7 @@ void main() {
 			const done = gl.getProgramParameter(job.prog, status);
 			if (typeof done !== 'boolean') { job.err = 'driver rejected COMPLETION_STATUS_KHR'; job.ok = false; finishJob(job); return true; }
 			if (!done) return false;
+			job.linkMs = performance.now() - job.linkT0;
 			if (!gl.getProgramParameter(job.prog, gl.LINK_STATUS)) {
 				job.err = 'program link failed:\n' + gl.getProgramInfoLog(job.prog);
 				job.ok = false;
@@ -424,11 +426,13 @@ void main() {
 			active: !!job.active,
 			ok: !!job.ok,
 			ms: Math.round(dt),
+			compileMs: Math.round(job.compileMs),
+			linkMs: Math.round(job.linkMs),
 			err: job.ok ? '' : String(job.err || 'compile abandoned').slice(0, 140),
 		});
 		if (Runner.compileLog.length > 48) Runner.compileLog.shift();
 		if (dt > 1000) {
-			try { console.log('[Runner] ' + job.meta.id + ' variant ' + job.key + ' ' + (job.active ? 'active' : 'background') + ' ready in ' + dt.toFixed(0) + 'ms' + (job.ok ? '' : ' FAILED')); } catch (e) {}
+			try { console.log('[Runner] ' + job.meta.id + ' variant ' + job.key + ' ' + (job.active ? 'active' : 'background') + ' ready in ' + dt.toFixed(0) + 'ms (compile ' + job.compileMs.toFixed(0) + 'ms, link ' + job.linkMs.toFixed(0) + 'ms)' + (job.ok ? '' : ' FAILED')); } catch (e) {}
 		}
 		if (job.ok && !job.stale) {
 			const item = {
@@ -719,50 +723,6 @@ void main() {
 		Runner.sceneTime = 0;
 	}
 
-	// Compile the variants this shader will probably be switched to next, one at
-	// a time in the background, so a later scene/shape click finds a linked
-	// program waiting. The glass-land (terrain) variant of the current shape is
-	// primed first because it is the most expensive switch.
-	function primeVariants(meta) {
-		const scenes = meta.scenes || [];
-		const shapes = meta.shapes || ['sphere'];
-		const hasTerrain = scenes.indexOf('terrain') >= 0;
-		const cur = variantOf(meta);
-		const queue = [];
-		const push = function (terrain, shape) {
-			const key = terrain + ':' + shape;
-			if (key === Runner.variantKey) return;
-			if (Runner.variants[key] || jobFor(meta, key)) return;
-			queue.push({ terrain: terrain, shape: shape, key: key });
-		};
-		if (hasTerrain && !cur.terrain) push(1, cur.shape);
-		for (let i = 0; i < shapes.length; i++) push(cur.terrain, shapeValue(shapes[i]));
-		if (hasTerrain) for (let i = 0; i < shapes.length; i++) push(1, shapeValue(shapes[i]));
-		Runner.primeQueue = queue;
-		Runner.primeActive = null;
-		pumpPrimeQueue();
-	}
-
-	function pumpPrimeQueue() {
-		if (Runner.primeActive) return;
-		const meta = Runner.current;
-		if (!meta) return;
-		while (Runner.primeQueue.length) {
-			const v = Runner.primeQueue.shift();
-			if (Runner.variants[v.key] || jobFor(meta, v.key)) continue;
-			const store = Runner.variants;
-			const job = makeJob(meta, v, store, false, function (err, item) {
-				if (Runner.primeActive === job) Runner.primeActive = null;
-				if (!err && item) {
-					if (job.store === Runner.variants) job.store[job.key] = item;
-					else Runner.gl.deleteProgram(item.program); // shader switched mid-prime
-				}
-				pumpPrimeQueue();
-			});
-			Runner.primeActive = job;
-			return;
-		}
-	}
 
 	function select(id, onReady) {
 		const list = window.SHADERS || [];
@@ -814,7 +774,6 @@ void main() {
 			activateVariant(meta, key, item);
 			commitSelect(meta);
 			if (onReady) onReady(null, meta);
-			primeVariants(meta);
 		});
 		pending.activeJob = job;
 		// Boot is async too. The previous synchronous finishJobSync here made
@@ -827,7 +786,7 @@ void main() {
 
 	// Called after the scene or shape toolbar changes. A linked variant is
 	// activated immediately; otherwise its compile job is created (or an
-	// in-flight background prime is promoted to it) and the swap happens when
+	// in-flight request for the same variant is reused) and the swap happens when
 	// the program is ready, leaving the old program rendering meanwhile.
 	function setVariant(onReady) {
 		const meta = Runner.current;
@@ -846,8 +805,6 @@ void main() {
 		if (existing) {
 			existing.active = true;
 			existing.onDone = function (err, it) {
-				if (Runner.primeActive === existing) Runner.primeActive = null;
-				pumpPrimeQueue();
 				if (err || existing.stale) {
 					if (it && it.program) Runner.gl.deleteProgram(it.program);
 					if (onReady) onReady(err, null);

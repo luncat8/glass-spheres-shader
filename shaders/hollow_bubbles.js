@@ -70,14 +70,14 @@ ${GLSL.land}
 
 // per-bubble absorption coefficients, hue spread over the golden ratio
 vec3 tintOf (float i) {
-\tfloat h = fract (i * GOLDEN);
-\tvec3 c = 0.5 + 0.5 * cos (2.0 * PI * (h + vec3 (0.0, 0.33, 0.67)));
-\treturn mix (vec3 (0.45), vec3 (1.0) - c, 0.55);
+	float h = fract (i * GOLDEN);
+	vec3 c = 0.5 + 0.5 * cos (2.0 * PI * (h + vec3 (0.0, 0.33, 0.67)));
+	return mix (vec3 (0.45), vec3 (1.0) - c, 0.55);
 }
 
 // thin-film interference palette, d = optical thickness of the wall
 vec3 filmTint (float d) {
-\treturn 0.5 + 0.5 * cos (2.0 * PI * (d * vec3 (1.0, 0.82, 0.66) + vec3 (0.0, 0.28, 0.55)));
+	return 0.5 + 0.5 * cos (2.0 * PI * (d * vec3 (1.0, 0.82, 0.66) + vec3 (0.0, 0.28, 0.55)));
 }
 
 // the cavity: the same shape around the same centre, scaled by the wall fraction
@@ -90,78 +90,78 @@ vec4 innerOf (vec4 sp) { return vec4 (sp.xyz, max (sp.w * (1.0 - uWall), sp.w * 
 // nHit is the outer surface normal at the event, facing the ray.
 vec3 crossWall (inout vec3 ro, inout vec3 rd, inout vec3 tp, inout vec3 bend,
                 vec4 sp, vec4 spin, float idx, bool entering, float tHit, vec3 nHit) {
-\tvec3 col = vec3 (0.0);
-\tvec3 c = sp.xyz;
-\tfloat R = sp.w;
-\tvec4 inner = innerOf (sp);
-\tvec3 rd0 = rd;
-\tfloat f0 = pow ((uIor - 1.0) / (uIor + 1.0), 2.0);
-\tvec3 n1, n2;
+	vec3 col = vec3 (0.0);
+	vec3 c = sp.xyz;
+	float R = sp.w;
+	vec4 inner = innerOf (sp);
+	vec3 rd0 = rd;
+	float f0 = pow ((uIor - 1.0) / (uIor + 1.0), 2.0);
+	vec3 n1, n2;
 
-\t// --- face A: where the ray meets this membrane -------------------------
-\tvec3 pA, nA;
-\tif (entering) {
-\t\tpA = ro + rd * tHit;
-\t\tnA = nHit;
-\t} else {
-\t\t// inside this object: the wall we are about to cross starts at the far
-\t\t// side of the cavity (inner surface); if there is none we are already
-\t\t// in the glass, so face A is the outer surface itself.
-\t\tvec2 hi = shapeHit (uShape, ro, rd, inner, spin, n1, n2);
-\t\tbool cavity = hi.y > EPS && hi.y < tHit && hi.y >= hi.x;
-\t\tpA = ro + rd * (cavity ? hi.y : tHit);
-\t\tnA = cavity ? -n2 : nHit;
-\t}
+	// --- face A: where the ray meets this membrane -------------------------
+	vec3 pA, nA;
+	if (entering) {
+		pA = ro + rd * tHit;
+		nA = nHit;
+	} else {
+		// inside this object: the wall we are about to cross starts at the far
+		// side of the cavity (inner surface); if there is none we are already
+		// in the glass, so face A is the outer surface itself.
+		vec2 hi = shapeHit (uShape, ro, rd, inner, spin, n1, n2);
+		bool cavity = hi.y > EPS && hi.y < tHit && hi.y >= hi.x;
+		pA = ro + rd * (cavity ? hi.y : tHit);
+		nA = cavity ? -n2 : nHit;
+	}
 
-\tfloat ndv = saturate1 (dot (-rd, nA));
-\tfloat F = fresnel (ndv, f0);
-\t// optical thickness of the wall along this ray, with a slow soap-film swirl
-\t// riding on the bubble so the iridescence is not a flat angular ramp
-\tfloat sw = 1.0 + 0.55 * swirl ((pA - c) / R * 2.6 + vec3 (0.0, iTime * 0.05, idx * 3.1));
-\tfloat optical = uWall * R * 9.0 * sw / max (ndv, 0.16);
-\tvec3 film = mix (vec3 (1.0), filmTint (optical), uIrid);
+	float ndv = saturate1 (dot (-rd, nA));
+	float F = fresnel (ndv, f0);
+	// optical thickness of the wall along this ray, with a slow soap-film swirl
+	// riding on the bubble so the iridescence is not a flat angular ramp
+	float sw = 1.0 + 0.55 * swirl ((pA - c) / R * 2.6 + vec3 (0.0, iTime * 0.05, idx * 3.1));
+	float optical = uWall * R * 9.0 * sw / max (ndv, 0.16);
+	vec3 film = mix (vec3 (1.0), filmTint (optical), uIrid);
 
-\tcol += tp * F * envSun (reflect (rd, nA)) * film;
-\t// what the film reflects, it does not transmit: tint the throughput with the
-\t// complementary colour so the bands are visible through the bubble too
-\ttp *= (1.0 - F) * mix (vec3 (1.0), clamp (vec3 (1.45) - film, 0.0, 1.0), uIrid * 0.8);
+	col += tp * F * envSun (reflect (rd, nA)) * film;
+	// what the film reflects, it does not transmit: tint the throughput with the
+	// complementary colour so the bands are visible through the bubble too
+	tp *= (1.0 - F) * mix (vec3 (1.0), clamp (vec3 (1.45) - film, 0.0, 1.0), uIrid * 0.8);
 
-\tvec3 rd1 = refract (rd, nA, 1.0 / uIor);
-\tif (dot (rd1, rd1) < 1e-5) {           // total internal reflection: mirror off
-\t\trd = reflect (rd, nA);
-\t\tro = pA + rd * EPS;
-\t\treturn col;
-\t}
+	vec3 rd1 = refract (rd, nA, 1.0 / uIor);
+	if (dot (rd1, rd1) < 1e-5) {           // total internal reflection: mirror off
+		rd = reflect (rd, nA);
+		ro = pA + rd * EPS;
+		return col;
+	}
 
-\t// --- through the glass to face B ---------------------------------------
-\tfloat chord;
-\tvec3 q = pA + rd1 * EPS;
-\tvec3 pB, nB;
-\tvec2 hin = shapeHit (uShape, q, rd1, inner, spin, n1, n2);
-\tif (entering && hin.x > 0.0 && hin.y > hin.x) {
-\t\tchord = hin.x;                     // reached the cavity
-\t\tpB = q + rd1 * chord;
-\t\tnB = n1;
-\t} else {
-\t\tvec2 hout = shapeHit (uShape, q, rd1, sp, spin, n1, n2);
-\t\tchord = max (hout.y, 0.0);         // thick rim / leaving the shell
-\t\tpB = q + rd1 * chord;
-\t\tnB = -n2;
-\t}
+	// --- through the glass to face B ---------------------------------------
+	float chord;
+	vec3 q = pA + rd1 * EPS;
+	vec3 pB, nB;
+	vec2 hin = shapeHit (uShape, q, rd1, inner, spin, n1, n2);
+	if (entering && hin.x > 0.0 && hin.y > hin.x) {
+		chord = hin.x;                     // reached the cavity
+		pB = q + rd1 * chord;
+		nB = n1;
+	} else {
+		vec2 hout = shapeHit (uShape, q, rd1, sp, spin, n1, n2);
+		chord = max (hout.y, 0.0);         // thick rim / leaving the shell
+		pB = q + rd1 * chord;
+		nB = -n2;
+	}
 
-\ttp *= exp (-tintOf (idx) * uDensity * chord * 3.5);
+	tp *= exp (-tintOf (idx) * uDensity * chord * 3.5);
 
-\tfloat F2 = fresnel (saturate1 (dot (-rd1, nB)), f0);
-\tcol += tp * F2 * envSun (reflect (rd1, nB)) * film * 0.85;
-\ttp *= (1.0 - F2);
+	float F2 = fresnel (saturate1 (dot (-rd1, nB)), f0);
+	col += tp * F2 * envSun (reflect (rd1, nB)) * film * 0.85;
+	tp *= (1.0 - F2);
 
-\tvec3 rd2 = refract (rd1, nB, uIor);
-\tif (dot (rd2, rd2) < 1e-5) rd2 = reflect (rd1, nB);
+	vec3 rd2 = refract (rd1, nB, uIor);
+	if (dot (rd2, rd2) < 1e-5) rd2 = reflect (rd1, nB);
 
-\tbend += rd2 - rd0;
-\tro = pB + rd2 * EPS;
-\trd = normalize (rd2);
-\treturn col;
+	bend += rd2 - rd0;
+	ro = pB + rd2 * EPS;
+	rd = normalize (rd2);
+	return col;
 }
 
 // membrane tracing with land culling: membranes behind the land block are
@@ -172,97 +172,97 @@ vec3 traceMembranes (vec3 ro0, vec3 rd0, float landT,
                      out float firstT,
                      out vec3 finalRo, out vec3 finalRd,
                      out vec3 finalTp, out vec3 finalBend) {
-\tvec3 col = vec3 (0.0);
-\tvec3 tp = vec3 (1.0);
-\tvec3 bend = vec3 (0.0);
-\tint layers = clamp (int (uLayers + 0.5), 1, 10);
-\tfirstT = BIG;
-\tvec3 ro = ro0;
-\tvec3 rd = rd0;
+	vec3 col = vec3 (0.0);
+	vec3 tp = vec3 (1.0);
+	vec3 bend = vec3 (0.0);
+	int layers = clamp (int (uLayers + 0.5), 1, 10);
+	firstT = BIG;
+	vec3 ro = ro0;
+	vec3 rd = rd0;
 
-\t// Both loop bounds come from uniforms: ANGLE's HLSL translator tries to
-\t// unroll constant-bound loops, and a 10 x 32 unroll of shapeHit is what
-\t// made first compiles take seconds on Windows.
-\tint nBub = min (uCount, MAXB);
-\tfor (int L = 0; L < layers; L++) {
-\t\tfloat bestT = BIG;
-\t\tint bi = -1;
-\t\tbool entering = true;
-\t\tvec3 bestN = vec3 (0.0);
-\t\tvec3 nA, nB;
-\t\tfor (int i = 0; i < nBub; i++) {
-\t\t\tvec2 h = shapeHit (uShape, ro, rd, uBubbles[i], uSpin[i], nA, nB);
-\t\t\tif (h.y < h.x) continue;
-\t\t\tbool ent = h.x > EPS;
-\t\t\tfloat te = ent ? h.x : h.y;
-\t\t\tif (te <= EPS || te >= bestT) continue;
-\t\t\tbestT = te; bi = i; entering = ent; bestN = ent ? nA : -nB;
-\t\t}
-\t\tif (bi < 0) break;
-\t\tif (bestT >= landT) break;
-\t\tif (L == 0) firstT = bestT;
+	// Both loop bounds come from uniforms: ANGLE's HLSL translator tries to
+	// unroll constant-bound loops, and a 10 x 32 unroll of shapeHit is what
+	// made first compiles take seconds on Windows.
+	int nBub = min (uCount, MAXB);
+	for (int L = 0; L < layers; L++) {
+		float bestT = BIG;
+		int bi = -1;
+		bool entering = true;
+		vec3 bestN = vec3 (0.0);
+		vec3 nA, nB;
+		for (int i = 0; i < nBub; i++) {
+			vec2 h = shapeHit (uShape, ro, rd, uBubbles[i], uSpin[i], nA, nB);
+			if (h.y < h.x) continue;
+			bool ent = h.x > EPS;
+			float te = ent ? h.x : h.y;
+			if (te <= EPS || te >= bestT) continue;
+			bestT = te; bi = i; entering = ent; bestN = ent ? nA : -nB;
+		}
+		if (bi < 0) break;
+		if (bestT >= landT) break;
+		if (L == 0) firstT = bestT;
 
-\t\tcol += crossWall (ro, rd, tp, bend, uBubbles[bi], uSpin[bi], float (bi), entering, bestT, bestN);
-\t\tif (max (tp.x, max (tp.y, tp.z)) < 0.02) {
-\t\t\tfinalRo = ro; finalRd = rd; finalTp = tp; finalBend = bend;
-\t\t\treturn col;
-\t\t}
-\t}
-\tfinalRo = ro; finalRd = rd; finalTp = tp; finalBend = bend;
-\treturn col;
+		col += crossWall (ro, rd, tp, bend, uBubbles[bi], uSpin[bi], float (bi), entering, bestT, bestN);
+		if (max (tp.x, max (tp.y, tp.z)) < 0.02) {
+			finalRo = ro; finalRd = rd; finalTp = tp; finalBend = bend;
+			return col;
+		}
+	}
+	finalRo = ro; finalRd = rd; finalTp = tp; finalBend = bend;
+	return col;
 }
 
 vec3 shadeRay (vec3 ro, vec3 rd) {
-\tfloat tLand; vec3 nLand; int idLand;
-\tlandHit (ro, rd, tLand, nLand, idLand);
-\tfloat landT = idLand >= 0 ? tLand : BIG;
+	float tLand; vec3 nLand; int idLand;
+	landHit (ro, rd, tLand, nLand, idLand);
+	float landT = idLand >= 0 ? tLand : BIG;
 
-\tfloat firstT;
-\tvec3 finalRo, finalRd, finalTp, finalBend;
-\tvec3 col = traceMembranes (ro, rd, landT, firstT, finalRo, finalRd, finalTp, finalBend);
+	float firstT;
+	vec3 finalRo, finalRd, finalTp, finalBend;
+	vec3 col = traceMembranes (ro, rd, landT, firstT, finalRo, finalRd, finalTp, finalBend);
 
-\tvec3 tailBg;
-\t{
-\t\tfloat t2; vec3 n2; int id2;
-\t\tlandHit (finalRo, finalRd, t2, n2, id2);
-\t\tif (id2 >= 0) tailBg = landShade (finalRo, finalRd, t2, n2, id2);
-\t\telse tailBg = envSun (finalRd);
-\t}
+	vec3 tailBg;
+	{
+		float t2; vec3 n2; int id2;
+		landHit (finalRo, finalRd, t2, n2, id2);
+		if (id2 >= 0) tailBg = landShade (finalRo, finalRd, t2, n2, id2);
+		else tailBg = envSun (finalRd);
+	}
 
-\tfloat k = uDisp * 0.4;
-\tif (k > 0.001 && dot (finalBend, finalBend) > 1e-6) {
-\t\tvec3 a = normalize (finalRd + finalBend * k);
-\t\tvec3 b = normalize (finalRd - finalBend * k);
-\t\tfloat tA; vec3 nA; int idA;
-\t\tlandHit (finalRo, a, tA, nA, idA);
-\t\tvec3 bgA = idA >= 0 ? landShade (finalRo, a, tA, nA, idA) : envSun (a);
-\t\tfloat tB; vec3 nB; int idB;
-\t\tlandHit (finalRo, b, tB, nB, idB);
-\t\tvec3 bgB = idB >= 0 ? landShade (finalRo, b, tB, nB, idB) : envSun (b);
-\t\tcol += finalTp * vec3 (bgA.r, tailBg.g, bgB.b);
-\t} else {
-\t\tcol += finalTp * tailBg;
-\t}
+	float k = uDisp * 0.4;
+	if (k > 0.001 && dot (finalBend, finalBend) > 1e-6) {
+		vec3 a = normalize (finalRd + finalBend * k);
+		vec3 b = normalize (finalRd - finalBend * k);
+		float tA; vec3 nA; int idA;
+		landHit (finalRo, a, tA, nA, idA);
+		vec3 bgA = idA >= 0 ? landShade (finalRo, a, tA, nA, idA) : envSun (a);
+		float tB; vec3 nB; int idB;
+		landHit (finalRo, b, tB, nB, idB);
+		vec3 bgB = idB >= 0 ? landShade (finalRo, b, tB, nB, idB) : envSun (b);
+		col += finalTp * vec3 (bgA.r, tailBg.g, bgB.b);
+	} else {
+		col += finalTp * tailBg;
+	}
 
-\treturn cageOverlay (col, ro, rd);
+	return cageOverlay (col, ro, rd);
 }
 
 void mainImage (out vec4 fragColor, in vec2 fragCoord) {
-\tvec3 ro, rd, col;
-\tif (uAA > 0.5) {
-\t\tcol = vec3 (0.0);
-\t\tfor (int j = 0; j < 4; j++) {
-\t\t\tvec2 o = vec2 (float (j / 2), float (j - (j / 2) * 2)) * 0.5 - 0.25;
-\t\t\tcamera (fragCoord + o, ro, rd);
-\t\t\tcol += shadeRay (ro, rd);
-\t\t}
-\t\tcol *= 0.25;
-\t} else {
-\t\tcamera (fragCoord, ro, rd);
-\t\tcol = shadeRay (ro, rd);
-\t}
-\tcol += selGlow (ro, rd);
-\tfragColor = vec4 (tonemap (col), 1.0);
+	vec3 ro, rd, col;
+	if (uAA > 0.5) {
+		col = vec3 (0.0);
+		for (int j = 0; j < 4; j++) {
+			vec2 o = vec2 (float (j / 2), float (j - (j / 2) * 2)) * 0.5 - 0.25;
+			camera (fragCoord + o, ro, rd);
+			col += shadeRay (ro, rd);
+		}
+		col *= 0.25;
+	} else {
+		camera (fragCoord, ro, rd);
+		col = shadeRay (ro, rd);
+	}
+	col += selGlow (ro, rd);
+	fragColor = vec4 (tonemap (col), 1.0);
 }
 `,
 };

@@ -406,12 +406,13 @@
 				' — ' + ax.noun + ' switched to "' + ax.reg.get(ax.cur).label + '"';
 		}
 		for (let a = 0; a < AXIS_LIST.length; a++) AXIS_LIST[a].reg.apply(meta, AXIS_LIST[a].cur);
-		// the selected program may compile in the background (async); the DOM
-		// below does not depend on it, only the status word waits for the swap
+		// The old linked program keeps drawing while this selection compiles.
+		// Keep its green highlight until the requested program is truly active.
 		statusEl.textContent = 'compiling…';
 		const done = function (err) {
-			if (err) { setErr(String(err.message || err)); statusEl.textContent = 'error'; return; }
+			if (err) { setErr(String(err.message || err)); statusEl.textContent = 'error'; refreshSelectors(); return; }
 			statusEl.textContent = readyStatus();
+			refreshSelectors();
 		};
 		try {
 			runner.select(id, done);
@@ -461,6 +462,7 @@
 		const previous = ax.cur;
 		setCur(ax, id, meta);
 		ax.reg.apply(meta, id);
+		statusEl.textContent = 'compiling…';
 		const done = function (err) {
 			if (err) {
 				// Keep the last linked program active if an optional variant is

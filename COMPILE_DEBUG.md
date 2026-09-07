@@ -51,7 +51,23 @@ path. Layers are now plain fixed-size arrays (`vec2 span[3]`, normals, sphere,
 `mk = (id, kind)`) with one small insert helper — no structs, no
 28-parameter functions.
 
-### 5. Hybrid-GPU laptops
+### 5. Speculative variants amplified (but did not cause) the slow compile
+After every shader selection the runner queued every terrain/shape variant in
+the background. `KHR_parallel_shader_compile` keeps JavaScript responsive; it
+does **not** promise independent compiler capacity. ANGLE and the native driver
+can serialize or heavily contend these jobs. The diagnostic trace showing a
+`hollow_bubbles 1:0` background job taking 272 s while active jobs also ran is
+the signature: the app was asking the driver to optimize large programs the
+user had never selected. This explains the 272 s queue/contended result, but
+not the underlying cold compile itself; the cold compile is still work done by
+the browser's ANGLE/native shader compiler.
+
+Background priming is now disabled. Variants compile only on demand and remain
+cached in the current shader's variant map after first use. This removes the
+self-inflicted queue and makes active timing identify the actual requested
+program.
+
+### 6. Hybrid-GPU laptops
 The WebGL context is now created with
 `powerPreference: 'high-performance'` so a laptop with an RTX 3060 plus an
 integrated GPU does not silently hand WebGL to the iGPU — a "good GPU" that
@@ -72,11 +88,16 @@ the app never used.
    `BOUNCES`, `NB`, the `LAYERS` pass, the 4-bisection refinements): they can
    be unrolled safely because their bodies already run uniform-bound loops,
    so there is no nested unroll to blow up.
-3. `compile every scene/shape variant of the first shader` reproduces what
-   background priming does; wait for the run and compare the slowest variant.
-4. First compile after browser start includes the driver's shader cache
-   miss; the second run on the same variant is expected to be fast — that is
-   not "fixed", it is the cache. Judge by the *first* run in a fresh profile.
-5. Startup and shape/scene switching should no longer freeze the page; the
-   status line stays "compiling…" until the swap. Report the `total`/`pollMax`
-   numbers instead of wall-clock guesses.
+3. `compile every scene/shape variant of the first shader` is now an explicit
+   stress test only; the application no longer does this speculative work.
+4. Enable `unique source (cold-cache probe)` (the default) to add a different
+   preprocessor nonce on each diagnostic run. This avoids reuse under a
+   source-keyed driver cache. A fresh browser profile remains the strongest
+   cold-cache test because WebGL cannot clear opaque OS/driver binary caches.
+5. Rows now report `compileWait` and `linkWait`, not just the near-zero API-call
+   durations. The larger wait identifies whether translation/compilation or
+   program linking dominated. `total` can exceed their sum by at most polling
+   cadence and bookkeeping.
+6. Startup and shape/scene switching should no longer freeze the page; the
+   status line stays "compiling…" until the swap. Report `compileWait`,
+   `linkWait`, `total`, and `pollMax` instead of wall-clock guesses.
