@@ -63,4 +63,8 @@ guidance for LLM agents
 	blocks that are no-ops outside their scene and are composed at their
 	measured depth against the renderer's nearest object.
 
+## files
 
+findings-pitfalls-skills.md - notes and pitfalls for LLM agents. write here if found good way to do something.
+
+archive/ - for implemented plans

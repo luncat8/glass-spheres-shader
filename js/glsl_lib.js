@@ -125,31 +125,45 @@ float sdKnot (vec3 p) {
 }
 #endif
 
-#if SHAPE_MODE == SHAPE_CUBE || SHAPE_MODE == SHAPE_TETRA
-// clip the ray span [t.x, t.y] against the half-space dot (p, n) <= d,
-// remembering which plane bounds each end
-void planeClip (vec3 ro, vec3 rd, vec3 n, float d, inout vec2 t, inout vec3 nEnter, inout vec3 nExit) {
-	float den = dot (rd, n);
-	float num = d - dot (ro, n);
-	if (abs (den) < 1e-7) { if (num < 0.0) t = vec2 (1.0, -1.0); return; }
-	float tp = num / den;
-	if (den < 0.0) { if (tp > t.x) { t.x = tp; nEnter = n; } return; }
-	if (tp < t.y) { t.y = tp; nExit = n; }
+// Slab intervals, including rays parallel to a face. Avoid 0 * infinity on
+// face-aligned rays; choose one normal at edge/corner ties (x, then y, then z).
+// Also used by the terrain, independently of the selected object shape.
+vec2 boxHit (vec3 ro, vec3 rd, vec3 c, vec3 h, out vec3 nEnter, out vec3 nExit) {
+	vec3 p = ro - c;
+	bvec3 parallel = lessThan (abs (rd), vec3 (1e-7));
+	nEnter = vec3 (0.0); nExit = vec3 (0.0);
+	if (any (greaterThan (abs (p) * vec3 (parallel), h))) return vec2 (1.0, -1.0);
+	vec3 m = 1.0 / mix (rd, vec3 (1.0), parallel);
+	vec3 n = m * p;
+	vec3 k = abs (m) * h;
+	vec3 t1 = mix (-n - k, vec3 (-1e9), parallel);
+	vec3 t2 = mix (-n + k, vec3 (1e9), parallel);
+	float a = max (max (t1.x, t1.y), t1.z);
+	float b = min (min (t2.x, t2.y), t2.z);
+	nEnter = -sign (rd) * (a == t1.x ? vec3 (1.0, 0.0, 0.0) : a == t1.y ? vec3 (0.0, 1.0, 0.0) : vec3 (0.0, 0.0, 1.0));
+	nExit = sign (rd) * (b == t2.x ? vec3 (1.0, 0.0, 0.0) : b == t2.y ? vec3 (0.0, 1.0, 0.0) : vec3 (0.0, 0.0, 1.0));
+	return vec2 (a, b);
+}
+
+#if SHAPE_MODE == SHAPE_TETRA
+// Evaluate the four half-spaces together rather than chaining branch-heavy
+// inout planeClip calls. The interval reduction has no growing live state.
+vec2 tetraHit (vec3 ro, vec3 rd, float h, out vec3 nEnter, out vec3 nExit) {
+	vec4 den = vec4 (dot (rd, TETRA_N0), dot (rd, TETRA_N1), dot (rd, TETRA_N2), dot (rd, TETRA_N3));
+	vec4 num = h - vec4 (dot (ro, TETRA_N0), dot (ro, TETRA_N1), dot (ro, TETRA_N2), dot (ro, TETRA_N3));
+	bvec4 parallel = lessThan (abs (den), vec4 (1e-7));
+	nEnter = vec3 (0.0); nExit = vec3 (0.0);
+	if (any (lessThan (num * vec4 (parallel), vec4 (0.0)))) return vec2 (1.0, -1.0);
+	vec4 t = num / mix (den, vec4 (1.0), parallel);
+	vec4 nearT = mix (vec4 (-1e9), t, lessThanEqual (den, vec4 (-1e-7)));
+	vec4 farT = mix (vec4 (1e9), t, greaterThanEqual (den, vec4 (1e-7)));
+	float a = max (max (nearT.x, nearT.y), max (nearT.z, nearT.w));
+	float b = min (min (farT.x, farT.y), min (farT.z, farT.w));
+	nEnter = a == nearT.x ? TETRA_N0 : a == nearT.y ? TETRA_N1 : a == nearT.z ? TETRA_N2 : TETRA_N3;
+	nExit = b == farT.x ? TETRA_N0 : b == farT.y ? TETRA_N1 : b == farT.z ? TETRA_N2 : TETRA_N3;
+	return vec2 (a, b);
 }
 #endif
-
-// axis-aligned box used by the optional terrain module. It stays available in
-// every shape variant because the land block is independent of object shape.
-vec2 boxHit (vec3 ro, vec3 rd, vec3 c, vec3 h, out vec3 nEnter, out vec3 nExit) {
-	vec3 m = 1.0 / rd;
-	vec3 n = m * (ro - c);
-	vec3 k = abs (m) * h;
-	vec3 t1 = -n - k;
-	vec3 t2 = -n + k;
-	nEnter = -sign (rd) * step (t1.yzx, t1.xyz) * step (t1.zxy, t1.xyz);
-	nExit = sign (rd) * step (t2.xyz, t2.yzx) * step (t2.xyz, t2.zxy);
-	return vec2 (max (max (t1.x, t1.y), t1.z), min (min (t2.x, t2.y), t2.z));
-}
 
 vec2 shapeHit (int shape, vec3 ro, vec3 rd, vec4 obj, vec4 spin, out vec3 nEnter, out vec3 nExit) {
 	vec2 t = ray_sphere (ro, rd, obj.xyz, obj.w);
@@ -158,34 +172,22 @@ vec2 shapeHit (int shape, vec3 ro, vec3 rd, vec4 obj, vec4 spin, out vec3 nEnter
 	if (t.y < t.x) return t;
 #if SHAPE_MODE == SHAPE_SPHERE || SHAPE_MODE == SHAPE_KNOT
 	return t;
-#elif SHAPE_MODE == SHAPE_CUBE
-	mat3 rot = spinMat (spin);
-	vec3 lo = (ro - obj.xyz) * rot;
-	vec3 ld = rd * rot;
-	vec3 nA = nEnter * rot, nB = nExit * rot;
-	float h = obj.w * CUBE_INSCRIBE;
-	planeClip (lo, ld, vec3 (1.0, 0.0, 0.0), h, t, nA, nB);
-	planeClip (lo, ld, vec3 (-1.0, 0.0, 0.0), h, t, nA, nB);
-	planeClip (lo, ld, vec3 (0.0, 1.0, 0.0), h, t, nA, nB);
-	planeClip (lo, ld, vec3 (0.0, -1.0, 0.0), h, t, nA, nB);
-	planeClip (lo, ld, vec3 (0.0, 0.0, 1.0), h, t, nA, nB);
-	planeClip (lo, ld, vec3 (0.0, 0.0, -1.0), h, t, nA, nB);
-	nEnter = rot * nA;
-	nExit = rot * nB;
-	return t;
 #else
+	// The selected objects use SHAPE_MODE, but cage top balls/selection can
+	// explicitly ask for a sphere even in a cube/tetra program.
+	if (shape == SHAPE_SPHERE) return t;
 	mat3 rot = spinMat (spin);
 	vec3 lo = (ro - obj.xyz) * rot;
 	vec3 ld = rd * rot;
-	vec3 nA = nEnter * rot, nB = nExit * rot;
-	float h = obj.w * TETRA_INRADIUS;
-	planeClip (lo, ld, TETRA_N0, h, t, nA, nB);
-	planeClip (lo, ld, TETRA_N1, h, t, nA, nB);
-	planeClip (lo, ld, TETRA_N2, h, t, nA, nB);
-	planeClip (lo, ld, TETRA_N3, h, t, nA, nB);
-	nEnter = rot * nA;
-	nExit = rot * nB;
-	return t;
+	vec3 nA, nB;
+#if SHAPE_MODE == SHAPE_CUBE
+	vec2 clipped = boxHit (lo, ld, vec3 (0.0), vec3 (obj.w * CUBE_INSCRIBE), nA, nB);
+#else
+	vec2 clipped = tetraHit (lo, ld, obj.w * TETRA_INRADIUS, nA, nB);
+#endif
+	if (clipped.x > t.x) nEnter = rot * nA;
+	if (clipped.y < t.y) nExit = rot * nB;
+	return vec2 (max (t.x, clipped.x), min (t.y, clipped.y));
 #endif
 }
 
@@ -392,18 +394,14 @@ void cageWireHit (vec3 ro, vec3 rd, out float t, out float mask) {
 	t = BIG;
 	mask = 0.0;
 	float c = uCageSize;
-	cageEdgeHit (ro, rd, vec3 (-c, -c, -c), vec3 ( c, -c, -c), t, mask);
-	cageEdgeHit (ro, rd, vec3 (-c, -c,  c), vec3 ( c, -c,  c), t, mask);
-	cageEdgeHit (ro, rd, vec3 (-c,  c, -c), vec3 ( c,  c, -c), t, mask);
-	cageEdgeHit (ro, rd, vec3 (-c,  c,  c), vec3 ( c,  c,  c), t, mask);
-	cageEdgeHit (ro, rd, vec3 (-c, -c, -c), vec3 (-c,  c, -c), t, mask);
-	cageEdgeHit (ro, rd, vec3 (-c, -c,  c), vec3 (-c,  c,  c), t, mask);
-	cageEdgeHit (ro, rd, vec3 ( c, -c, -c), vec3 ( c,  c, -c), t, mask);
-	cageEdgeHit (ro, rd, vec3 ( c, -c,  c), vec3 ( c,  c,  c), t, mask);
-	cageEdgeHit (ro, rd, vec3 (-c, -c, -c), vec3 (-c, -c,  c), t, mask);
-	cageEdgeHit (ro, rd, vec3 (-c,  c, -c), vec3 (-c,  c,  c), t, mask);
-	cageEdgeHit (ro, rd, vec3 ( c, -c, -c), vec3 ( c, -c,  c), t, mask);
-	cageEdgeHit (ro, rd, vec3 ( c,  c, -c), vec3 ( c,  c,  c), t, mask);
+	int edges = clamp (uCageEdges, 0, 12);
+	for (int i = 0; i < edges; i++) {
+		vec2 side = vec2 (float ((i % 4) >> 1), float (i & 1)) * 2.0 - 1.0;
+		vec3 a = vec3 (-c, side * c), b = vec3 (c, side * c);
+		if (i >= 8) { a = a.yzx; b = b.yzx; }
+		else if (i >= 4) { a = a.yxz; b = b.yxz; }
+		cageEdgeHit (ro, rd, a, b, t, mask);
+	}
 }
 
 vec3 cageDrawWire (vec3 behind, float mask) {
@@ -453,6 +451,12 @@ vec3 cageOverlay (vec3 behind, vec3 ro, vec3 rd) {
 	return col;
 }
 `;
+
+	// Even a small constant loop can expand a large caller. Keep the edge
+	// budget opaque to the compiler; it is fixed at twelve in the UI.
+	GLSL.cageParams = function () {
+		return [{ name: 'uCageEdges', type: 'int', def: 12, hidden: true }];
+	};
 
 	// selection halo: rim glow on the selected object. uSel = (centre, bounding
 	// radius), w <= 0 disables it; uSelRot = its spin, a zero axis means a plain
@@ -518,9 +522,8 @@ float fbm3 (vec2 p, float drift) {
 	// world geometry like GLSL.cageOverlay: the renderer keeps drawing its own
 	// objects and composites the land at its measured depth. Requires
 	// GLSL.common, GLSL.env, GLSL.shape (boxHit) and GLSL.simplex.
-	// LAND_MAX_STEPS was 96 — reduced to 64 after reports of very slow first
-	// compile (driver shader cache makes later runs fast). The param still
-	// offers 32/64, 96 would force a 96-unroll that some drivers choke on.
+	// The runtime march budget is 32 or 64 steps. Compile cost also depends on
+	// how many callers the backend expands; a small loop is not inherently safe.
 	GLSL.land = `#if USE_TERRAIN
 #define LAND_SKIRT 1.0
 #define LAND_IOR 1.45
@@ -557,11 +560,10 @@ vec3 landNormal (vec2 xz) {
 
 // first crossing of the terrain on [t0, t1] (the start is above it): equal
 // steps, then four bisections. -1.0 when the ray stays above the terrain.
-// (was 5 bisections + 96 max steps — reduced after slow-compile reports)
 float landMarch (vec3 ro, vec3 rd, float t0, float t1, int steps) {
 	// n is derived from the uLandSteps uniform: the dynamic bound keeps the
-	// driver from unrolling the 64-step loop during compilation (ANGLE/FXC,
-	// see COMPILE_DEBUG.md) without changing the runtime budget.
+	// compiler from seeing a fixed trip count (see COMPILE_DEBUG.md), without
+	// changing the runtime budget. Final loop lowering is backend-dependent.
 	int n = min (steps, LAND_MAX_STEPS);
 	float dt = (t1 - t0) / float (n);
 	if (dt <= 0.0) return -1.0;

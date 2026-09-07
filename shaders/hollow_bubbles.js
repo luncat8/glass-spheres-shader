@@ -51,6 +51,7 @@ window.SHADER_hollow_bubbles = {
 		{ "name": "uSpread", "type": "float", "label": "spread", "min": 0.5, "max": 2.0, "step": 0.05, "def": 1.0, "scenes": ["checker", "rainbow", "colorbox"], "hint": "how far the drifting bubbles wander" },
 		{ "name": "uSize", "type": "float", "label": "size", "min": 0.4, "max": 1.6, "step": 0.05, "def": 1.0, "hint": "object size scale" },
 		{ "name": "uAA", "type": "float", "label": "AA", "min": 0, "max": 1, "step": 1, "def": 0, "hint": "2x2 supersampling (4x cost)" },
+		...GLSL.cageParams(),
 		...GLSL.landParams()
 	],
 	"source":
@@ -180,9 +181,8 @@ vec3 traceMembranes (vec3 ro0, vec3 rd0, float landT,
 	vec3 ro = ro0;
 	vec3 rd = rd0;
 
-	// Both loop bounds come from uniforms: ANGLE's HLSL translator tries to
-	// unroll constant-bound loops, and a 10 x 32 unroll of shapeHit is what
-	// made first compiles take seconds on Windows.
+	// Keep both trip counts data-driven: expanding the outer trace also
+	// duplicates every intersection and membrane-material call inside it.
 	int nBub = min (uCount, MAXB);
 	for (int L = 0; L < layers; L++) {
 		float bestT = BIG;
@@ -249,18 +249,15 @@ vec3 shadeRay (vec3 ro, vec3 rd) {
 
 void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 	vec3 ro, rd, col;
-	if (uAA > 0.5) {
-		col = vec3 (0.0);
-		for (int j = 0; j < 4; j++) {
-			vec2 o = vec2 (float (j / 2), float (j - (j / 2) * 2)) * 0.5 - 0.25;
-			camera (fragCoord + o, ro, rd);
-			col += shadeRay (ro, rd);
-		}
-		col *= 0.25;
-	} else {
-		camera (fragCoord, ro, rd);
-		col = shadeRay (ro, rd);
+	col = vec3 (0.0);
+	// One trace call site and a uniform trip count, not five expanded scenes.
+	int samples = uAA > 0.5 ? 4 : 1;
+	for (int j = 0; j < samples; j++) {
+		vec2 o = samples == 1 ? vec2 (0.0) : vec2 (float (j / 2), float (j % 2)) * 0.5 - 0.25;
+		camera (fragCoord + o, ro, rd);
+		col += shadeRay (ro, rd);
 	}
+	col /= float (samples);
 	col += selGlow (ro, rd);
 	fragColor = vec4 (tonemap (col), 1.0);
 }

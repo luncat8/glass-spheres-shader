@@ -30,6 +30,7 @@ window.SHADER_thick_raymarch = {
 	"params": [
 		{ "name": "uScene", "type": "int", "def": 0, "hidden": true },
 		{ "name": "uShape", "type": "int", "def": 0, "hidden": true },
+		{ "name": "uBounces", "type": "int", "def": 2, "hidden": true },
 		{ "name": "uSteps", "type": "int", "def": 48, "hidden": true, "hint": "raymarch step budget (uniform loop bound, keeps the driver from unrolling)" },
 		{ "name": "uSpread", "type": "float", "label": "spread", "min": 0.5, "max": 2.0, "step": 0.05, "def": 1.0, "scenes": ["checker", "rainbow", "colorbox"], "hint": "how far the four bubbles travel" },
 		{ "name": "uTopCount", "type": "int", "label": "on top", "min": 0, "max": 3, "step": 1, "def": 3, "scenes": ["cage"], "hint": "balls bouncing on the top face of the cage" },
@@ -37,6 +38,7 @@ window.SHADER_thick_raymarch = {
 		{ "name": "uSize", "type": "float", "label": "size", "min": 0.8, "max": 2.4, "step": 0.05, "def": 1.7, "scenes": ["cage"], "hint": "cage sphere radius scale" },
 		{ "name": "uWireWidth", "type": "float", "label": "wire", "min": 0.008, "max": 0.08, "step": 0.002, "def": 0.026, "scenes": ["cage"], "hint": "cage line thickness" },
 		{ "name": "uGravity", "type": "float", "label": "gravity", "min": 2.5, "max": 10.0, "step": 0.25, "def": 4.75, "scenes": ["cage"], "hint": "top-ball gravity" },
+		...GLSL.cageParams(),
 		...GLSL.landParams()
 	],
 	"source":
@@ -54,7 +56,6 @@ ${GLSL.land}
 #define MAXSTEPS 48
 #define MAXDIS   40.0
 #define SURF     0.004
-#define BOUNCES  2
 #define IOR      1.52
 #define F0       0.04
 #define SMOOTH_K 0.35
@@ -101,9 +102,8 @@ vec3 mapNormal (vec3 p) {
 vec2 march (vec3 ro, vec3 rd, float side) {
 	float t = 0.02;
 	float m = 0.0;
-	// uSteps is a uniform: ANGLE's HLSL translator unrolls constant-bound
-	// loops, and a 48-step unroll of the 4-sphere SDF would be a multi-second
-	// link; a uniform-driven bound keeps it a real loop (see COMPILE_DEBUG.md)
+	// Keep the trip count unknown to discourage expansion of the four-object
+	// SDF. The outer trace must stay compact too (see COMPILE_DEBUG.md).
 	for (int i = 0; i < uSteps; i++) {
 		vec2 h = map (ro + rd * t);
 		m = h.y;
@@ -157,13 +157,17 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 	camera (fragCoord, ro, rd);
 	vec3 viewRo = ro, viewRd = rd;
 
-	float refl, tHit, firstT;
-	bool hit;
-	vec3 col = shadeHit (ro, rd, refl, hit, firstT);
-	float filt = refl;
-	for (int i = 0; i < BOUNCES; i++) {
+	float firstT = BIG;
+	float filt = 1.0;
+	bool hit = true;
+	vec3 col = vec3 (0.0);
+	// The primary ray and reflection rays share one compiled shadeHit body.
+	int passes = 1 + clamp (uBounces, 0, 2);
+	for (int i = 0; i < passes; i++) {
 		if (!hit || filt < 0.02) break;
+		float refl, tHit;
 		vec3 c = shadeHit (ro, rd, refl, hit, tHit);
+		if (i == 0) firstT = tHit;
 		col += c * filt;
 		filt *= refl;
 	}

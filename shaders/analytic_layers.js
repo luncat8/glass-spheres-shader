@@ -50,6 +50,7 @@ window.SHADER_analytic_layers = {
 		{ "name": "uDensity", "type": "float", "label": "tint", "min": 0.0, "max": 3.0, "step": 0.05, "def": 0.55, "hint": "glass membrane absorption" },
 		{ "name": "uIrid", "type": "float", "label": "iris", "min": 0.0, "max": 1.0, "step": 0.05, "def": 0.55, "hint": "thin-film colour on the rims" },
 		{ "name": "uAA", "type": "float", "label": "render AA", "min": 0, "max": 1, "step": 1, "def": 0, "hint": "optional 2x2 shader supersampling in addition to the global AA button" },
+		...GLSL.cageParams(),
 		...GLSL.landParams()
 	],
 	"source":
@@ -78,82 +79,40 @@ vec3 filmTint (float phase) {
 	return 0.52 + 0.48 * cos (2.0 * PI * (phase * vec3 (1.0, 0.81, 0.64) + vec3 (0.02, 0.31, 0.58)));
 }
 
-// One object layer: entry/exit depths, outward normals there, the object and
-// its id; kind 0 = glass object, 1 = opaque top ball of the cage. Layers are
-// stored as plain fixed-size arrays, index 0 = nearest. No structs and no
-// 28-inout-parameter functions: both made this function the slowest link in
-// the project (tens of seconds on some ANGLE/Windows drivers).
-void pushLayer (inout vec2 span[LAYERS], inout vec3 n[LAYERS], inout vec3 nx[LAYERS],
-                inout vec4 sph[LAYERS], inout vec2 mk[LAYERS],
-                vec2 h, vec3 na, vec3 nb, vec4 sp, vec2 m) {
-	if (h.x < span[0].x) {
-		span[2] = span[1]; n[2] = n[1]; nx[2] = nx[1]; sph[2] = sph[1]; mk[2] = mk[1];
-		span[1] = span[0]; n[1] = n[0]; nx[1] = nx[0]; sph[1] = sph[0]; mk[1] = mk[0];
-		span[0] = h; n[0] = na; nx[0] = nb; sph[0] = sp; mk[0] = m;
+// Sort only (entry, exit, id, kind), not normals and whole objects. Rebuild
+// the two normals for the <= 3 survivors instead of moving 42 live scalars
+// through every insertion. kind 0 = glass object, 1 = opaque cage top ball.
+void pushLayer (inout vec4 hits[LAYERS], vec4 h) {
+	if (h.x < hits[0].x) {
+		hits[2] = hits[1]; hits[1] = hits[0]; hits[0] = h;
 		return;
 	}
-	if (h.x < span[1].x) {
-		span[2] = span[1]; n[2] = n[1]; nx[2] = nx[1]; sph[2] = sph[1]; mk[2] = mk[1];
-		span[1] = h; n[1] = na; nx[1] = nb; sph[1] = sp; mk[1] = m;
+	if (h.x < hits[1].x) {
+		hits[2] = hits[1]; hits[1] = h;
 		return;
 	}
-	if (h.x < span[2].x) {
-		span[2] = h; n[2] = na; nx[2] = nb; sph[2] = sp; mk[2] = m;
-	}
+	hits[2] = h;
 }
 
-// the object's hit as a layer; a ray starting inside sees the exit surface.
-// span = (t, tx), mk = (id, kind).
-bool objectHit (int shape, vec3 ro, vec3 rd, vec4 obj, vec4 spin, float id, float kind,
-                out vec2 span, out vec3 n, out vec3 nx, out vec4 sph, out vec2 mk) {
-	span = vec2 (BIG);
-	n = vec3 (0.0, 1.0, 0.0);
-	nx = n;
-	sph = vec4 (0.0);
-	mk = vec2 (-1.0);
-	vec3 nA, nB;
-	vec2 th = shapeHit (shape, ro, rd, obj, spin, nA, nB);
-	if (th.y <= EPS || th.y < th.x) return false;
-	bool outside = th.x > EPS;
-	span = outside ? vec2 (th.x, th.y) : vec2 (th.y, th.y);
-	n = outside ? nA : -nB;
-	nx = nB;
-	sph = obj;
-	mk = vec2 (id, kind);
-	return true;
-}
-
-// Keep only the nearest LAYERS layers. Three transparent shells are enough to
-// preserve overlap depth without multiplying work by layer count. The loops
-// are bounded by uniforms (uCount / uTopCount), never constants, so the
-// driver compiles a real loop instead of unrolling it (ANGLE + FXC).
-void sphereHits (vec3 ro, vec3 rd,
-                 out vec2 span[LAYERS], out vec3 n[LAYERS], out vec3 nx[LAYERS],
-                 out vec4 sph[LAYERS], out vec2 mk[LAYERS]) {
-	for (int i = 0; i < LAYERS; i++) {
-		span[i] = vec2 (BIG);
-		n[i] = vec3 (0.0, 1.0, 0.0);
-		nx[i] = n[i];
-		sph[i] = vec4 (0.0);
-		mk[i] = vec2 (-1.0);
+int sphereHits (vec3 ro, vec3 rd, out vec4 hits[LAYERS]) {
+	for (int i = 0; i < LAYERS; i++) hits[i] = vec4 (BIG, BIG, -1.0, -1.0);
+	int count = 0;
+	int nInside = clamp (uCount, 0, MAX_INSIDE);
+	int topN = (uScene == 3) ? clamp (uTopCount, 0, MAX_TOP) : 0;
+	for (int i = 0; i < nInside + topN; i++) {
+		bool top = i >= nInside;
+		int id = top ? i - nInside : i;
+		vec2 h;
+		vec3 nA, nB;
+		if (top) h = ray_sphere (ro, rd, uTop[id].xyz, uTop[id].w);
+		else h = shapeHit (uShape, ro, rd, uInside[id], uSpin[id], nA, nB);
+		if (h.y <= EPS || h.y < h.x) continue;
+		float t = h.x > EPS ? h.x : h.y;
+		if (t >= hits[2].x) continue;
+		pushLayer (hits, vec4 (t, h.y, float (id), top ? 1.0 : 0.0));
+		count = min (count + 1, LAYERS);
 	}
-	vec2 h;
-	vec3 na, nb;
-	vec4 sp;
-	vec2 m;
-	int nInside = min (uCount, MAX_INSIDE);
-	for (int i = 0; i < nInside; i++) {
-		if (objectHit (uShape, ro, rd, uInside[i], uSpin[i], float (i), 0.0, h, na, nb, sp, m)) {
-			pushLayer (span, n, nx, sph, mk, h, na, nb, sp, m);
-		}
-	}
-	// the balls on top belong to the cage scene only, and stay spheres
-	int topN = (uScene == 3) ? min (uTopCount, MAX_TOP) : 0;
-	for (int i = 0; i < topN; i++) {
-		if (objectHit (SHAPE_SPHERE, ro, rd, uTop[i], vec4 (0.0), float (i), 1.0, h, na, nb, sp, m)) {
-			pushLayer (span, n, nx, sph, mk, h, na, nb, sp, m);
-		}
-	}
+	return count;
 }
 
 vec3 shadeGlass (vec3 behind, vec3 ro, vec3 rd, float t, float tx, vec3 n, vec3 nx, vec4 sph, float id) {
@@ -189,17 +148,19 @@ vec3 shadeGlass (vec3 behind, vec3 ro, vec3 rd, float t, float tx, vec3 n, vec3 
 	return col;
 }
 
-vec3 shadeSphere (vec3 behind, vec3 ro, vec3 rd, float t, float tx, vec3 n, vec3 nx, vec4 sph, float id, float kind) {
-	if (kind > 0.5) return cageShadeTop (behind, ro, rd, sph, t, id);
-	return shadeGlass (behind, ro, rd, t, tx, n, nx, sph, id);
+vec3 shadeLayer (vec3 behind, vec3 ro, vec3 rd, vec4 hit) {
+	int id = int (hit.z);
+	if (hit.w > 0.5) return cageShadeTop (behind, ro, rd, uTop[id], hit.x, hit.z);
+	vec4 sph = uInside[id];
+	vec3 n, nx;
+	vec2 h = shapeHit (uShape, ro, rd, sph, uSpin[id], n, nx);
+	if (h.x <= EPS) n = -nx;
+	return shadeGlass (behind, ro, rd, hit.x, hit.y, n, nx, sph, hit.z);
 }
 
 vec3 trace (vec3 ro, vec3 rd) {
-	vec2 span[LAYERS];
-	vec3 n[LAYERS], nx[LAYERS];
-	vec4 sph[LAYERS];
-	vec2 mk[LAYERS];
-	sphereHits (ro, rd, span, n, nx, sph, mk);
+	vec4 hits[LAYERS];
+	int count = sphereHits (ro, rd, hits);
 	float wireT = BIG, wireMask = 0.0;
 	// the wire cube is world-space geometry, so it only exists in the cage scene
 	if (uScene == 3) cageWireHit (ro, rd, wireT, wireMask);
@@ -215,23 +176,14 @@ vec3 trace (vec3 ro, vec3 rd) {
 		if (lid < 0) landT = BIG;
 		else col = landShade (ro, rd, landT, ln, lid);
 	}
-	for (int i = 0; i < LAYERS; i++) {
-		if (landT < span[i].x) mk[i].y = -1.0;
-	}
 	bool wireDone = wireMask <= 0.0;
-	// Compose from far to near. The wire is inserted at its measured ray depth
-	// instead of being an always-on-top screen overlay.
-	if (mk[2].y >= 0.0) {
-		if (!wireDone && wireT > span[2].x) { col = cageDrawWire (col, wireMask); wireDone = true; }
-		col = shadeSphere (col, ro, rd, span[2].x, span[2].y, n[2], nx[2], sph[2], mk[2].x, mk[2].y);
-	}
-	if (mk[1].y >= 0.0) {
-		if (!wireDone && wireT > span[1].x) { col = cageDrawWire (col, wireMask); wireDone = true; }
-		col = shadeSphere (col, ro, rd, span[1].x, span[1].y, n[1], nx[1], sph[1], mk[1].x, mk[1].y);
-	}
-	if (mk[0].y >= 0.0) {
-		if (!wireDone && wireT > span[0].x) { col = cageDrawWire (col, wireMask); wireDone = true; }
-		col = shadeSphere (col, ro, rd, span[0].x, span[0].y, n[0], nx[0], sph[0], mk[0].x, mk[0].y);
+	// A hit-count bound keeps ONE copy of the material/env path, not three
+	// manually inlined copies. Insert the wire at its measured ray depth.
+	for (int i = count - 1; i >= 0; i--) {
+		vec4 h = hits[i];
+		if (landT < h.x) continue;
+		if (!wireDone && wireT > h.x) { col = cageDrawWire (col, wireMask); wireDone = true; }
+		col = shadeLayer (col, ro, rd, h);
 	}
 	if (!wireDone) col = cageDrawWire (col, wireMask);
 	return col;
@@ -239,18 +191,16 @@ vec3 trace (vec3 ro, vec3 rd) {
 
 void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 	vec3 ro, rd, col;
-	if (uAA > 0.5) {
-		col = vec3 (0.0);
-		for (int i = 0; i < 4; i++) {
-			vec2 o = vec2 (float (i & 1), float (i >> 1)) * 0.5 - 0.25;
-			camera (fragCoord + o, ro, rd);
-			col += trace (ro, rd);
-		}
-		col *= 0.25;
-	} else {
-		camera (fragCoord, ro, rd);
-		col = trace (ro, rd);
+	col = vec3 (0.0);
+	// Keep one trace call site even with AA off; a constant 4-tap loop plus
+	// an else trace can expand the entire scene five times in the backend.
+	int samples = uAA > 0.5 ? 4 : 1;
+	for (int i = 0; i < samples; i++) {
+		vec2 o = samples == 1 ? vec2 (0.0) : vec2 (float (i & 1), float (i >> 1)) * 0.5 - 0.25;
+		camera (fragCoord + o, ro, rd);
+		col += trace (ro, rd);
 	}
+	col /= float (samples);
 	// Use the centre ray for a stable click-selection rim after supersampling.
 	camera (fragCoord, ro, rd);
 	col += selGlow (ro, rd);

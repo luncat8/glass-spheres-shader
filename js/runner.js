@@ -114,7 +114,7 @@ void main() {
 	// tools_GPU/check-glsl.mjs can rebuild the exact fragment source the browser
 	// would compile. Browser behaviour below is untouched.
 	if (IS_NODE) {
-		module.exports = { detectCubeChannels, resolveChannelKinds, buildFSHeader, buildUniformDecls, FS_FOOTER, VS };
+		module.exports = { detectCubeChannels, resolveChannelKinds, buildFSHeader, buildUniformDecls, variantSource, FS_FOOTER, VS };
 		return;
 	}
 
@@ -275,13 +275,11 @@ void main() {
 	//
 	// A variant is one (shader × scene-terrain × shape) combination. On many
 	// drivers compiling a variant blocks the page: the link alone was measured
-	// at seconds-to-tens-of-seconds on integrated GPUs, even for the default
-	// sphere/sky program. Where KHR_parallel_shader_compile is available the
-	// driver compiles and links on its own threads, a job below is polled until
-	// ready while the previous program keeps rendering, and the swap happens
-	// only after the new program has actually linked. Without the extension a
-	// job is finished synchronously inside makeJob, preserving the old blocking
-	// behaviour rather than regressing it.
+	// at seconds-to-tens-of-seconds on some backends, even for the default
+	// sphere/sky program. The link wait includes backend shader compilation,
+	// not just symbol linking. KHR_parallel_shader_compile makes waiting
+	// non-blocking, not cheaper. Without it, status queries must block; defer
+	// those to the next tick so the UI can first display its busy state.
 
 	const SHAPE_VALUES = { sphere: 0, cube: 1, tetra: 2, knot: 3 };
 
@@ -335,6 +333,8 @@ void main() {
 		}
 		if (gl.getShaderParameter(job.vs, gl.COMPILE_STATUS)) {
 			if (gl.getShaderParameter(job.fs, gl.COMPILE_STATUS)) {
+				job.compileMs = performance.now() - job.t0;
+				job.linkT0 = performance.now();
 				job.prog = gl.createProgram();
 				gl.attachShader(job.prog, job.vs);
 				gl.attachShader(job.prog, job.fs);
@@ -343,6 +343,7 @@ void main() {
 					job.err = 'program link failed:\n' + gl.getProgramInfoLog(job.prog);
 					job.ok = false;
 				}
+				job.linkMs = performance.now() - job.linkT0;
 			} else {
 				job.err = 'fragment shader compile failed:\n' + gl.getShaderInfoLog(job.fs);
 				job.ok = false;
@@ -432,7 +433,7 @@ void main() {
 		});
 		if (Runner.compileLog.length > 48) Runner.compileLog.shift();
 		if (dt > 1000) {
-			try { console.log('[Runner] ' + job.meta.id + ' variant ' + job.key + ' ' + (job.active ? 'active' : 'background') + ' ready in ' + dt.toFixed(0) + 'ms (compile ' + job.compileMs.toFixed(0) + 'ms, link ' + job.linkMs.toFixed(0) + 'ms)' + (job.ok ? '' : ' FAILED')); } catch (e) {}
+			try { console.log('[Runner] ' + job.meta.id + ' variant ' + job.key + ' ' + (job.active ? 'active' : 'background') + ' ready in ' + dt.toFixed(0) + 'ms (GL compile/translation ' + job.compileMs.toFixed(0) + 'ms, link/backend ' + job.linkMs.toFixed(0) + 'ms)' + (job.ok ? '' : ' FAILED')); } catch (e) {}
 		}
 		if (job.ok && !job.stale) {
 			const item = {
@@ -591,10 +592,8 @@ void main() {
 
 	function init(canvas) {
 		Runner.canvas = canvas;
-		// high-performance: on hybrid-GPU laptops Chrome otherwise hands WebGL
-		// to the low-power integrated GPU, which is exactly the "slow on a
-		// good GPU" case. contextLost is tracked so in-flight compiles fail
-		// cleanly instead of polling forever.
+		// This is a GPU-selection hint, not a way to speed up CPU-side shader
+		// compilation. The actual adapter/backend is reported by debug.html.
 		const gl = canvas.getContext('webgl2', {
 			antialias: false,
 			preserveDrawingBuffer: true,
@@ -1000,7 +999,7 @@ void main() {
 
 	const api = { init, select, setVariant, run, stop, stats, setAA, getAA, setMov, getMov, mouse: Runner.mouse };
 	api.onAAChangeSetter = (f) => { Runner.onAAChange = f; };
-	api.helpers = { VS, FS_FOOTER, buildFSHeader, buildUniformDecls, resolveChannelKinds, detectCubeChannels };
+	api.helpers = { VS, FS_FOOTER, buildFSHeader, buildUniformDecls, resolveChannelKinds, detectCubeChannels, variantSource };
 	Object.defineProperty(api, 'current', { get: () => Runner.current });
 	Object.defineProperty(api, 'elapsed', { get: () => Runner.elapsed });
 	Object.defineProperty(api, 'sceneTime', { get: () => Runner.sceneTime });

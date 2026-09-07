@@ -1,103 +1,160 @@
-# Compile performance — status and how to measure it
+# Shader compilation: cause, changes, and reproducible measurement
 
-## Reported symptom
-- Switching shape / scene took 2–3 s and choosing the glass-land scene was very
-  long: every new variant was compiled and linked by the driver.
-- `analytic_layers` linked in ~20 s on an integrated-GPU driver even for the
-  default sphere program; after one successful compile the driver cache made
-  the same variant fast again. So the cost is driver-side compilation, not
-  rendering, and it is CPU-bound: an RTX 3060 does not help.
-- `WebGL: INVALID_ENUM: getShaderParameter: invalid parameter name` and a
-  freeze at startup when polling with `gl.COMPLETION_STATUS_KHR`.
+## What the Chrome 151 timings establish
 
-## Root causes found (and fixed here)
+`analytic_layers 0:1` took about **44.6 seconds**, with about **19 ms** waiting
+for the WebGL shader compile stage and **44.6 seconds** waiting for the linked
+program. The sphere variant took about **13 seconds**. API calls and completion
+polls themselves were short.
 
-### 1. The completion enum was taken from the wrong object
-`COMPLETION_STATUS_KHR` is a member of the *extension object*, not of the
-context on every implementation (`ext.COMPLETION_STATUS_KHR`, per the WebGL
-extension spec; MDN sample code queries `gl.getProgramParameter(p,
-ext.COMPLETION_STATUS_KHR)`). Passing `gl.COMPLETION_STATUS_KHR` where that
-property is undefined produces exactly the reported INVALID_ENUM. The runner
-now stores the extension object at `init()` and polls with
-`Runner.completionStatus`; a non-boolean answer from the driver fails the job
-with a readable error instead of polling forever.
+That identifies the **program/backend stage**, not slow JavaScript polling or
+slow drawing. `linkProgram` can include backend shader generation, native
+compilation, optimization and executable creation. It is not merely resolving
+symbols. The WebGL timers cannot identify the particular native optimizer pass
+or distinguish all of those operations. Compilation is largely CPU-side work;
+an RTX's rendering throughput does not make a pathologically expanded shader
+cheap to compile.
 
-### 2. Startup was still synchronous
-`Runner.select()` built the first program with `finishJobSync()` on the boot
-path, and `getShaderParameter(COMPILE_STATUS)`/`LINK_STATUS` block until the
-driver finishes — the startup freeze. Boot now goes through the same polled
-path as every shape/scene switch: the page stays responsive, `frame()` renders
-nothing until the program links, and the status line says "compiling…" until
-the swap.
+`WebKit WebGL` is a masked renderer string, not the adapter/backend identity.
+`debug.html` now reports `WEBGL_debug_renderer_info` when available.
+`powerPreference: 'high-performance'` is only a selection hint, not proof of
+which GPU was chosen and not a compiler-speed fix.
 
-### 3. The driver unrolls constant-bound loops
-ANGLE (D3D/HLSL and Metal backends) tries to unroll `for (i < CONST)` loops;
-with `break` on a uniform it still attempts the unroll at compile time and
-FXC can spend tens of seconds on a 10 × 32 (hollow bubbles) or 48-step ×
-4-sphere-SDF (thick raymarch) unroll. Every object/march loop bound is now
-driven from a uniform with a clamped cap, so the trip count is unknown at
-compile time and the driver emits a real loop. Scene shaders use `uCount`,
-`uLayers`, `uTopCount`, `uLandSteps`, `uSteps`; the own/orig shaders use
-`uIterations`/`uAASamples` (`multi_thinfilm`, `ld3SDl`) and
-`uCellRange`/`uBlurSamples` (`llsSDf`). Runtime behaviour is unchanged: the
-same scales are the old maxima (the blur taps keep the original 0.8 total
-weight whatever the tap count).
+## The source-level problem the earlier changes missed
 
-### 4. Struct/inout plumbing in `analytic_layers`
-The nearest-three-layers code was a 7-field struct returned by value and moved
-through `inout` struct parameters; then a flat version with 7 inout scalars
-per layer (28 parameters). Both shapes push ANGLE's translator into its slow
-path. Layers are now plain fixed-size arrays (`vec2 span[3]`, normals, sphere,
-`mk = (id, kind)`) with one small insert helper — no structs, no
-28-parameter functions.
+Making the long inner loops uniform-bound did **not** remove the larger
+expansion around them. The important size is the optimizer's expanded code and
+live state, not the roughly 30 KB input string:
 
-### 5. Speculative variants amplified (but did not cause) the slow compile
-After every shader selection the runner queued every terrain/shape variant in
-the background. `KHR_parallel_shader_compile` keeps JavaScript responsive; it
-does **not** promise independent compiler capacity. ANGLE and the native driver
-can serialize or heavily contend these jobs. The diagnostic trace showing a
-`hollow_bubbles 1:0` background job taking 272 s while active jobs also ran is
-the signature: the app was asking the driver to optimize large programs the
-user had never selected. This explains the 272 s queue/contended result, but
-not the underlying cold compile itself; the cold compile is still work done by
-the browser's ANGLE/native shader compiler.
+- **AA:** `analytic_layers` and `hollow_bubbles` had a constant four-tap loop
+  containing a full scene trace, plus another trace in the `else` branch.
+  Inlining/unrolling can produce **five copies of the whole scene**, even when
+  the AA uniform defaults to off. Uniform defaults are not compile-time values.
+- **Layers:** `analytic_layers` manually called the material path three times.
+  Combined with AA, that could create **15 material paths**, each calling the
+  multi-theme procedural environment. Its insertion loop also moved five arrays
+  containing **42 scalar components** through `out`/`inout` parameters.
+- **Shared cage:** twelve explicit `cageEdgeHit` calls chained conditional updates
+  of the nearest depth/mask, duplicated again at every expanded scene trace.
+- **Cube/tetra:** each `shapeHit` chained six/four branch-heavy `planeClip` calls
+  with mutable interval and normal outputs. The more complicated body was copied
+  into the same outer paths, explaining why these variants are strong suspects
+  for the additional cost over spheres.
+- **Other glass shaders:** `thick_raymarch` duplicated its primary/bounce shading
+  path; `thick_chain` had a constant outer hop count. `thick_analytic` shaded and
+  sorted four opaque results even though only the nearest result survived.
 
-Background priming is now disabled. Variants compile only on demand and remain
-cached in the current shader's variant map after first use. This removes the
-self-inflicted queue and makes active timing identify the actual requested
-program.
+A 2–4 iteration outer loop is **not automatically safe** because its inner loop
+is dynamic. The inner loop's entire body can still be copied for each outer
+iteration. Nor are GLSL structs inherently slow or arrays inherently fast: the
+amount of copied state and control flow matters. There is no shader recursion
+here, and no portable WebGL GLSL `noinline`/`nounroll` directive. Actual lowering
+is compiler/backend-dependent; the old claim that the root problem was already
+fixed was premature.
 
-### 6. Hybrid-GPU laptops
-The WebGL context is now created with
-`powerPreference: 'high-performance'` so a laptop with an RTX 3060 plus an
-integrated GPU does not silently hand WebGL to the iGPU — a "good GPU" that
-the app never used.
+## Structural changes (not lower quality settings)
 
-## What is left to verify (on Chrome 150 / RTX 3060+)
+- One trace call site with a uniform-derived 1-or-4 sample count in both AA
+  shaders. Same sample positions and weights.
+- One data-dependent, back-to-front material loop in `analytic_layers`, bounded
+  by the number of retained hits. Sort only `(entry, exit, id, kind)` records;
+  reconstruct normals for at most three survivors, not every insertion.
+- One cage-edge call inside a runtime-bounded loop, preserving all twelve edges
+  and their original order. The fixed budget is a hidden uniform.
+- Cube intersections use slab intervals; tetra intersections reduce four plane
+  intervals together, rather than chaining `inout` clipping calls. Parallel
+  face rays avoid division-by-zero/NaN cases. Explicit sphere hits still work
+  inside a cube/tetra program (needed for cage top balls and their selection;
+  the previous specialization incorrectly ignored that argument).
+- One primary/bounce material call site in `thick_raymarch`; runtime hop bounds
+  in `thick_chain`; nearest-hit selection **before** shading in `thick_analytic`.
 
-1. `debug.html` reports whether `KHR_parallel_shader_compile` is available,
-   whether the context exposes `gl.COMPLETION_STATUS_KHR`, and per-stage
-   timing: `compileCall`, `linkCall`, and `pollMax` (a large `pollMax` means a
-   poll call is stalling — the extension is effectively synchronous there).
-2. `compile all shaders` shows the boot programs (terrain=0, sphere) — if any
-   is still > ~500 ms, the driver path is still slow and the remaining
-   candidates are the big shared libraries in `js/glsl_lib.js` (`GLSL.env`'s
-   four themes, `GLSL.cageOverlay`'s twelve wire edges) that every scene
-   program carries, and the per-pixel recursive `shapeHit` calls. What
-   remains constant-bound is only 2–4 iteration outer loops (`HOPS`,
-   `BOUNCES`, `NB`, the `LAYERS` pass, the 4-bisection refinements): they can
-   be unrolled safely because their bodies already run uniform-bound loops,
-   so there is no nested unroll to blow up.
-3. `compile every scene/shape variant of the first shader` is now an explicit
-   stress test only; the application no longer does this speculative work.
-4. Enable `unique source (cold-cache probe)` (the default) to add a different
-   preprocessor nonce on each diagnostic run. This avoids reuse under a
-   source-keyed driver cache. A fresh browser profile remains the strongest
-   cold-cache test because WebGL cannot clear opaque OS/driver binary caches.
-5. Rows now report `compileWait` and `linkWait`, not just the near-zero API-call
-   durations. The larger wait identifies whether translation/compilation or
-   program linking dominated. `total` can exceed their sum by at most polling
-   cadence and bookkeeping.
-6. Startup and shape/scene switching should no longer freeze the page; the
-   status line stays "compiling…" until the swap. Report `compileWait`,
-   `linkWait`, `total`, and `pollMax` instead of wall-clock guesses.
+Object limits, three retained transparent layers, AA taps, reflection/hop
+budgets, terrain march budgets, materials and all supported variants remain.
+There is no speculative background compilation. The extension-based waiting and
+`ext.COMPLETION_STATUS_KHR` fix remain, but those address responsiveness, not
+the amount of compilation work.
+
+## Validation and its limits
+
+Local comparison: **Chromium 149, Linux, ANGLE/Vulkan/SwiftShader**, not the
+reported Chrome 151 / RTX driver. Median of three serialized batches per
+revision; each batch started a fresh browser process with
+`--disable-gpu-shader-disk-cache`. Fixed populated scene, 32 × 32 pixels, AA off.
+Times include shader/program creation and the **first draw/readback**, because
+this backend defers most native work until drawing:
+
+| Non-terrain program | Before | After |
+| --- | ---: | ---: |
+| analytic_layers / sphere | 1266 ms | 345 ms |
+| analytic_layers / cube | 1415 ms | 270 ms |
+| analytic_layers / tetra | 1331 ms | 277 ms |
+| hollow_bubbles / sphere | 813 ms | 333 ms |
+| thick_analytic / sphere | 589 ms | 212 ms |
+| thick_raymarch / sphere | 549 ms | 278 ms |
+| thick_chain / sphere | 285 ms | 236 ms |
+
+Component experiments on the old analytic cube source also reduced first-use
+cost when changing AA or layer composition independently. This supports the
+code-expansion diagnosis; **it is not evidence of a particular RTX link time**.
+The Chrome 151 / actual GPU/backend cold result is still needed. Shader source
+changes alone cannot guarantee a sub-500-ms compile on every driver.
+
+Validation tools:
+
+- `node --test tests/*.test.cjs` — source equivalence, probe isolation, retained
+  budgets, async/sync timing, failure handling, correct extension enum and cleanup.
+- Optional browser checks: install dev-only `playwright`, install its Chromium,
+  then `node tests/webgl-smoke.cjs`. `CHROME` selects another installed executable;
+  `CHROME_ARGS` accepts a JSON array of flags. No runtime dependencies or build.
+  Checks **43 supported programs** through link and first draw, component probes,
+  the diagnostic UI via `file://`, and **726 GPU geometry cases** against scalar
+  half-space/sphere intersections (including inside, parallel, rotated and
+  sphere-override rays).
+- Local before/after image comparisons were pixel-identical for the tested
+  non-terrain sphere images of all five changed renderers, and analytic cube /
+  tetra checker images with four-sample AA. The corrected non-sphere cage-top
+  geometry is an intentional visual difference.
+
+## Measuring the actual cold path
+
+1. **Do not treat reload, disabled HTTP cache, new WebGL context, a comment, or
+   an unused nonce `#define` as a cold native compile.** The unused nonce in the
+   previous debug page disappeared during preprocessing; a downstream cache
+   could still see identical input. There are multiple independent cache levels.
+2. For a controlled exact-source run, use a **fresh browser process and empty
+   disposable profile**, with shader disk caching disabled. General launch form:
+   `chrome --user-data-dir=<empty-temporary-directory> --disable-gpu-shader-disk-cache`.
+   Do not use an existing profile/process, and do not remove your personal profile.
+   Browser flags are implementation details; record browser version and flags.
+3. Opaque OS/vendor caches can still survive a fresh profile. For strict native
+   cold measurements, also use the driver's supported cache controls, if
+   available; record and restore those settings. **WebGL cannot flush those
+   caches or attest that a compile was cold.**
+4. Open `debug.html` alone, keep it foreground, select `analytic_layers`, then
+   cube or tetra, non-terrain. Run **compile selected variant** before the bulk
+   tests. Avoid other app/diagnostic compile jobs at the same time.
+5. **Exact production source** uses the runner's very same assembler.
+   **Live-literal cache probe** changes a used final RGB multiplier, so it survives
+   preprocessing into compiler input. It intentionally changes output and is
+   still only a cache probe, not a guaranteed miss at every layer.
+6. Save the report. It includes source hashes (FNV-1a identifiers, not cache-miss
+   certificates), exact GLSL, browser/backend identity, compile/link call times,
+   both stage waits, and maximum completion-poll duration across both shaders
+   and the program. Stage waits **include** the API calls; do not add them twice.
+   Poll cadence and tab scheduling limit precision of short timings.
+7. Optionally capture **translated source**. `WEBGL_debug_shaders` may return HLSL,
+   GLSL or an intermediate representation depending on the backend; it is not
+   native machine code or an optimizer trace. Capture happens after completion,
+   outside the reported compile/link interval.
+8. Optionally time **first draw/readback** to catch deferred native compilation.
+   This draws one diagnostic pixel with default scalar parameters and placeholder
+   objects/textures. It includes setup and synchronization, can
+   block the page, and is **not an FPS benchmark**. A `gl.finish()` call alone
+   need not force a client-side wait in Chromium; the readback does.
+9. **Compare components** removes one component at a time (environment, wires,
+   glass material, terrain, or uses bounding spheres). These are deliberately
+   non-equivalent diagnostic shaders, never production settings. Compare them
+   under the same cache conditions. Stop waits for the current job; deletion
+   cannot reliably cancel a native compile. After timeout/context loss, restart
+   the browser before another controlled run.

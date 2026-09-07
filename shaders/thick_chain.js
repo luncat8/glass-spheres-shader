@@ -28,6 +28,7 @@ window.SHADER_thick_chain = {
 	"params": [
 		{ "name": "uScene", "type": "int", "def": 0, "hidden": true },
 		{ "name": "uShape", "type": "int", "def": 0, "hidden": true },
+		{ "name": "uHops", "type": "int", "def": 3, "hidden": true },
 		{ "name": "uSteps", "type": "int", "def": 48, "hidden": true, "hint": "raymarch step budget (uniform loop bound, keeps the driver from unrolling)" },
 		{ "name": "uSpread", "type": "float", "label": "spread", "min": 0.5, "max": 2.0, "step": 0.05, "def": 1.0, "scenes": ["checker", "rainbow", "colorbox"], "hint": "how far the four bubbles travel" },
 		{ "name": "uTopCount", "type": "int", "label": "on top", "min": 0, "max": 3, "step": 1, "def": 3, "scenes": ["cage"], "hint": "balls bouncing on the top face of the cage" },
@@ -35,6 +36,7 @@ window.SHADER_thick_chain = {
 		{ "name": "uSize", "type": "float", "label": "size", "min": 0.8, "max": 2.4, "step": 0.05, "def": 1.7, "scenes": ["cage"], "hint": "cage sphere radius scale" },
 		{ "name": "uWireWidth", "type": "float", "label": "wire", "min": 0.008, "max": 0.08, "step": 0.002, "def": 0.026, "scenes": ["cage"], "hint": "cage line thickness" },
 		{ "name": "uGravity", "type": "float", "label": "gravity", "min": 2.5, "max": 10.0, "step": 0.25, "def": 4.75, "scenes": ["cage"], "hint": "top-ball gravity" },
+		...GLSL.cageParams(),
 		...GLSL.landParams()
 	],
 	"source":
@@ -52,7 +54,6 @@ ${GLSL.land}
 #define MAXSTEPS 48
 #define MAXDIS   40.0
 #define SURF     0.004
-#define HOPS     3
 #define IOR      1.52
 #define F0       0.04
 #define SMOOTH_K 0.35
@@ -96,9 +97,8 @@ vec3 mapNormal (vec3 p) {
 vec2 march (vec3 ro, vec3 rd, float side) {
 	float t = 0.02;
 	float m = 0.0;
-	// uSteps is a uniform: ANGLE's HLSL translator unrolls constant-bound
-	// loops, and a 48-step unroll of the 4-sphere SDF would be a multi-second
-	// link; a uniform-driven bound keeps it a real loop (see COMPILE_DEBUG.md)
+	// Keep the trip count unknown to discourage expansion of the four-object
+	// SDF. The outer trace must stay compact too (see COMPILE_DEBUG.md).
 	for (int i = 0; i < uSteps; i++) {
 		vec2 h = map (ro + rd * t);
 		m = h.y;
@@ -120,7 +120,7 @@ void mainImage (out vec4 fragColor, in vec2 fragCoord) {
 	bool addTail = true;    // does the surviving ray still see the environment?
 	float firstT = BIG;     // depth of the primary hit, for the land block
 
-	for (int hop = 0; hop < HOPS; hop++) {
+	for (int hop = 0; hop < clamp (uHops, 1, 3); hop++) {
 		vec2 h = march (ro, rd, 1.0);
 		if (h.x >= MAXDIS) break;
 		if (hop == 0) firstT = h.x;
